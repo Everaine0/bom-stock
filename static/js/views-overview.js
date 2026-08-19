@@ -9,8 +9,8 @@ window.Views.overview = {
     catch (e) { container.innerHTML = '<div class="danger-box">加载失败：' + U.esc(e.message) + '</div>'; return; }
 
     const pc = st.project_counts || {};
-    const statusName = { draft: '草稿', in_progress: '进行中', completed: '已完成', closed: '已关闭' };
-    const statusTag = { draft: 'gray', in_progress: 'blue', completed: 'green', closed: 'org' };
+    const statusName = { draft: '草稿', in_progress: '进行中', completed: '已完成' };
+    const statusTag = { draft: 'gray', in_progress: 'blue', completed: 'green' };
 
     let out = '<div class="grid-stats">' +
       '<div class="stat"><div class="k">库存总值</div><div class="v acc">' + U.fmtMoney(st.inventory_value) + '</div></div>' +
@@ -21,11 +21,13 @@ window.Views.overview = {
       '<div class="stat"><div class="k">已完成项目成本</div><div class="v">' + U.fmtMoney(st.cost_completed) + '</div></div>' +
       '<div class="stat"><div class="k">总收益(已完成)</div><div class="v grn">' + U.fmtMoney(st.revenue) + '</div></div>' +
       '<div class="stat"><div class="k">毛利</div><div class="v ' + (st.profit >= 0 ? 'grn' : 'red') + '">' + U.fmtMoney(st.profit) + '</div></div>' +
+      '<div class="stat"><div class="k">待采购 PCB</div><div class="v ' + ((st.pending_pcb || 0) > 0 ? 'org' : '') + '">' + U.fmtNum(st.pending_pcb || 0) + '</div></div>' +
+      '<div class="stat"><div class="k">待采购 钢网</div><div class="v ' + ((st.pending_stencil || 0) > 0 ? 'org' : '') + '">' + U.fmtNum(st.pending_stencil || 0) + '</div></div>' +
       '</div>';
 
     // 项目状态分布
     out += '<div class="card"><h2>项目分布</h2><div class="status-row">';
-    for (const k of ['draft', 'in_progress', 'completed', 'closed']) {
+    for (const k of ['draft', 'in_progress', 'completed']) {
       out += '<span class="tag ' + statusTag[k] + '">' + (statusName[k] || k) + '：' + U.fmtNum(pc[k] || 0) + '</span>';
     }
     out += '</div></div>';

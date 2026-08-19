@@ -34,20 +34,21 @@ CREATE TABLE IF NOT EXISTS stock_logs(
   created_at   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS projects(
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  name          TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'draft',
-  created_at    TEXT NOT NULL,
-  board_count   INTEGER NOT NULL DEFAULT 1,
-  loss_ratio    REAL,
-  needs_pcb     INTEGER NOT NULL DEFAULT 0,
-  pcb_cost      REAL NOT NULL DEFAULT 0,
-  needs_stencil INTEGER NOT NULL DEFAULT 0,
-  stencil_cost  REAL NOT NULL DEFAULT 0,
-  other_cost    REAL NOT NULL DEFAULT 0,
-  revenue       REAL,
-  note          TEXT NOT NULL DEFAULT '',
-  closed_at     TEXT
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  name              TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'draft',
+  created_at        TEXT NOT NULL,
+  board_count       INTEGER NOT NULL DEFAULT 1,
+  loss_ratio        REAL,
+  needs_pcb         INTEGER NOT NULL DEFAULT 0,
+  pcb_cost          REAL NOT NULL DEFAULT 0,
+  needs_stencil     INTEGER NOT NULL DEFAULT 0,
+  stencil_cost      REAL NOT NULL DEFAULT 0,
+  other_cost        REAL NOT NULL DEFAULT 0,
+  revenue           REAL,
+  note              TEXT NOT NULL DEFAULT '',
+  closed_at         TEXT,
+  parent_project_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS project_items(
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +62,16 @@ CREATE TABLE IF NOT EXISTS project_items(
   occupied      INTEGER NOT NULL DEFAULT 0,
   bought        INTEGER NOT NULL DEFAULT 0,
   bought_cost   REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS project_purchases(
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  kind       TEXT NOT NULL,            -- 'pcb' | 'stencil'
+  qty        INTEGER NOT NULL DEFAULT 1,
+  cost       REAL NOT NULL DEFAULT 0,
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id, kind)
 );
 """
 
@@ -93,6 +104,10 @@ def conn_ctx():
 def init_db():
     with conn_ctx() as conn:
         conn.executescript(SCHEMA)
+        # 迁移：老库补 parent_project_id 列
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()]
+        if "parent_project_id" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN parent_project_id INTEGER")
     with conn_ctx() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value) VALUES('default_loss_ratio','5')"
@@ -123,6 +138,7 @@ def dump_all() -> dict:
             "stock_logs": [dict(r) for r in conn.execute("SELECT * FROM stock_logs").fetchall()],
             "projects": [dict(r) for r in conn.execute("SELECT * FROM projects").fetchall()],
             "project_items": [dict(r) for r in conn.execute("SELECT * FROM project_items").fetchall()],
+            "project_purchases": [dict(r) for r in conn.execute("SELECT * FROM project_purchases").fetchall()],
         }
 
 
@@ -156,12 +172,13 @@ def restore_all(data: dict):
         for p in data.get("projects", []):
             conn.execute(
                 "INSERT INTO projects(id,name,status,created_at,board_count,loss_ratio,"
-                "needs_pcb,pcb_cost,needs_stencil,stencil_cost,other_cost,revenue,note,closed_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "needs_pcb,pcb_cost,needs_stencil,stencil_cost,other_cost,revenue,note,closed_at,parent_project_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (p["id"], p["name"], p.get("status", "draft"), p.get("created_at", now()),
                  p.get("board_count", 1), p.get("loss_ratio"), p.get("needs_pcb", 0),
                  p.get("pcb_cost", 0), p.get("needs_stencil", 0), p.get("stencil_cost", 0),
-                 p.get("other_cost", 0), p.get("revenue"), p.get("note", ""), p.get("closed_at")),
+                 p.get("other_cost", 0), p.get("revenue"), p.get("note", ""), p.get("closed_at"),
+                 p.get("parent_project_id")),
             )
         for it in data.get("project_items", []):
             conn.execute(
@@ -170,4 +187,11 @@ def restore_all(data: dict):
                 (it["id"], it["project_id"], it.get("component_id"), it["name"], it.get("footprint", ""),
                  it.get("designator", ""), it.get("qty_per_board", 1), it.get("total_needed", 0),
                  it.get("occupied", 0), it.get("bought", 0), it.get("bought_cost", 0)),
+            )
+        for x in data.get("project_purchases", []):
+            conn.execute(
+                "INSERT INTO project_purchases(id,project_id,kind,qty,cost,note,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (x["id"], x["project_id"], x.get("kind", "pcb"), x.get("qty", 1),
+                 x.get("cost", 0), x.get("note", ""), x.get("created_at", now())),
             )

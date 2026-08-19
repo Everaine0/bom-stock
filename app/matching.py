@@ -126,3 +126,56 @@ def match_row(bom_name: str, bom_foot: str, comp) -> str | None:
             return "canonical"
 
     return None
+
+
+# 位号前缀 -> 类别（从 BOM 建元件时自动分类）
+_DESIGNATOR_CAT = [
+    ("LED", "LED"),
+    ("SW", "开关"),
+    ("CN", "连接器"),
+    ("BT", "电池"),
+    ("TP", "测试点"),
+    ("R", "电阻"),
+    ("C", "电容"),
+    ("L", "电感"),
+    ("U", "IC"),
+    ("D", "二极管"),
+    ("Q", "晶体管"),
+    ("J", "连接器"),
+    ("P", "连接器"),
+    ("X", "晶振"),
+    ("Y", "晶振"),
+    ("CR", "晶振"),
+    ("F", "保险丝"),
+    ("T", "变压器"),
+    ("B", "电池"),
+    ("K", "开关"),
+    ("M", "电机"),
+    ("E", "其他"),
+]
+
+
+def infer_category(name: str, designator: str = "") -> str:
+    """根据位号前缀、其次按名称单位推断元件类别。"""
+    d = norm(designator)
+    if d:
+        # 多字母前缀优先
+        for pref, cat in _DESIGNATOR_CAT:
+            if len(pref) > 1 and d.startswith(pref.lower()):
+                return cat
+        # 单字母取第一个字母
+        ch = d[0]
+        if ch.isalpha():
+            for pref, cat in _DESIGNATOR_CAT:
+                if len(pref) == 1 and pref.lower() == ch:
+                    return cat
+    # 按名称规范值推断：Ω->电阻 / F->电容 / H->电感
+    cans = canonical_candidates(name)
+    for c in cans:
+        if c.endswith("Ω"):
+            return "电阻"
+        if c.endswith("F"):
+            return "电容"
+        if c.endswith("H"):
+            return "电感"
+    return "其他"

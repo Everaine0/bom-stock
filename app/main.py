@@ -66,6 +66,13 @@ class RevenueIn(BaseModel):
     revenue: Optional[float] = None
 
 
+class PurchaseExtraIn(BaseModel):
+    kind: str = "pcb"  # 'pcb' | 'stencil'
+    qty: int = 1
+    cost: float = 0
+    note: str = ""
+
+
 class SettingsIn(BaseModel):
     default_loss_ratio: float = 5
 
@@ -102,10 +109,31 @@ def compute_needed(per_board, board_count, loss):
     return max(0, math.ceil(per_board * board_count * (1 + loss / 100.0)))
 
 
-def extra_cost(p):
-    if hasattr(p, "keys"):
-        p = dict(p)
-    return (p.get("pcb_cost") or 0) + (p.get("stencil_cost") or 0) + (p.get("other_cost") or 0)
+def purchase_cost(conn, pid):
+    r = conn.execute(
+        "SELECT COALESCE(SUM(cost),0) s FROM project_purchases WHERE project_id=?", (pid,)
+    ).fetchone()
+    return r["s"] or 0
+
+
+def extra_cost(conn, pid, other_cost=0):
+    return purchase_cost(conn, pid) + (other_cost or 0)
+
+
+def cost_total_for(conn, pid, other_cost=0):
+    bought = conn.execute(
+        "SELECT COALESCE(SUM(bought_cost),0) s FROM project_items WHERE project_id=?", (pid,)
+    ).fetchone()["s"] or 0
+    return round(bought + extra_cost(conn, pid, other_cost), 2)
+
+
+def series_root(conn, pid):
+    cur = pid
+    while True:
+        r = conn.execute("SELECT parent_project_id FROM projects WHERE id=?", (cur,)).fetchone()
+        if not r or not r["parent_project_id"]:
+            return cur
+        cur = r["parent_project_id"]
 
 
 def project_detail(conn, pid):
@@ -145,24 +173,60 @@ def project_detail(conn, pid):
             "shortage": shortage,
             "component": {"id": comp["id"], "qty": comp["qty"]} if comp else None,
         })
+    purchases = [dict(r) for r in conn.execute(
+        "SELECT * FROM project_purchases WHERE project_id=?", (pid,)
+    ).fetchall()]
+    have = {x["kind"] for x in purchases}
+    pending_purchases = []
+    if p.get("needs_pcb") and "pcb" not in have:
+        pending_purchases.append({"kind": "pcb", "name": "PCB打板", "qty": max(1, p["board_count"])})
+    if p.get("needs_stencil") and "stencil" not in have:
+        pending_purchases.append({"kind": "stencil", "name": "钢网", "qty": 1})
+    cost_extra = extra_cost(conn, pid, p.get("other_cost"))
+    root = series_root(conn, pid)
+    members_raw = conn.execute(
+        "SELECT * FROM projects WHERE id=? OR parent_project_id=? ORDER BY created_at, id", (root, root)
+    ).fetchall()
+    series = []
+    for m in members_raw:
+        m = dict(m)
+        series.append({
+            "id": m["id"],
+            "name": m["name"],
+            "status": m["status"],
+            "board_count": m["board_count"],
+            "cost_total": cost_total_for(conn, m["id"], m.get("other_cost")),
+            "revenue": m["revenue"],
+        })
+    series_total_cost = round(sum(s["cost_total"] for s in series), 2)
+    series_total_revenue = round(sum((s["revenue"] or 0) for s in series), 2)
     return {
         "project": {**p, "loss_ratio_effective": loss},
         "items": items,
+        "purchases": purchases,
+        "pending_purchases": pending_purchases,
+        "series": {
+            "root": root,
+            "members": series,
+            "total_cost": series_total_cost,
+            "total_revenue": series_total_revenue,
+            "total_profit": round(series_total_revenue - series_total_cost, 2),
+        },
         "cost_bought": round(bought_cost, 2),
-        "cost_extra": round(extra_cost(p), 2),
-        "cost_total": round(bought_cost + extra_cost(p), 2),
+        "cost_extra": round(cost_extra, 2),
+        "cost_total": round(bought_cost + cost_extra, 2),
         "shortage_total": shortage_total,
     }
 
 
 def project_with_cost(conn, p):
     d = row2d(p)
-    bought = conn.execute(
-        "SELECT COALESCE(SUM(bought_cost),0) s FROM project_items WHERE project_id=?", (p["id"],)
-    ).fetchone()["s"]
-    d["cost_total"] = round((bought or 0) + extra_cost(d), 2)
+    d["cost_total"] = cost_total_for(conn, p["id"], d.get("other_cost"))
     d["item_count"] = conn.execute(
         "SELECT COUNT(*) n FROM project_items WHERE project_id=?", (p["id"],)
+    ).fetchone()["n"]
+    d["series_count"] = conn.execute(
+        "SELECT COUNT(*) n FROM projects WHERE parent_project_id=?", (p["id"],)
     ).fetchone()["n"]
     return d
 
@@ -317,6 +381,7 @@ def api_project_delete(pid: int):
             raise HTTPException(404, "项目不存在")
         if p["status"] != "draft":
             raise HTTPException(400, "只有草稿项目可以删除")
+        conn.execute("DELETE FROM project_purchases WHERE project_id=?", (pid,))
         conn.execute("DELETE FROM project_items WHERE project_id=?", (pid,))
         conn.execute("DELETE FROM projects WHERE id=?", (pid,))
         return {"ok": True}
@@ -385,6 +450,7 @@ def api_item_newcomponent(pid: int, iid: int):
             raise HTTPException(404, "BOM 条目不存在")
         name = it["name"]
         foot = it["footprint"]
+        cat = matching.infer_category(name, it["designator"])
         dup = conn.execute(
             "SELECT id FROM components WHERE lower(name)=? AND lower(footprint)=?",
             (matching.norm(name), matching.norm(foot)),
@@ -395,11 +461,11 @@ def api_item_newcomponent(pid: int, iid: int):
             cur = conn.execute(
                 "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note) "
                 "VALUES(?,?,?,?,0,0,'从BOM创建')",
-                (name, foot, "其他", "[]"),
+                (name, foot, cat, "[]"),
             )
             cid = cur.lastrowid
         conn.execute("UPDATE project_items SET component_id=? WHERE id=?", (cid, iid))
-        return {"component_id": cid}
+        return {"component_id": cid, "category": cat}
 
 
 @app.delete("/api/projects/{pid}/items/{iid}")
@@ -506,24 +572,30 @@ def api_project_complete(pid: int):
             raise HTTPException(404, "项目不存在")
         if p["status"] != "in_progress":
             raise HTTPException(400, "仅进行中的项目可以完成")
+        bad = 0
+        for it in conn.execute("SELECT * FROM project_items WHERE project_id=?", (pid,)).fetchall():
+            if it["component_id"] and max(0, it["total_needed"] - it["occupied"] - it["bought"]) > 0:
+                bad += 1
+        if bad:
+            raise HTTPException(400, f"仍有 {bad} 种元件缺件未补齐，不能标记为已完成")
         conn.execute("UPDATE projects SET status='completed' WHERE id=?", (pid,))
         return project_detail(conn, pid)
 
 
 @app.post("/api/projects/{pid}/close")
 def api_project_close(pid: int):
+    """关闭（仅进行中可用）= 退回元件并将项目彻底删除。"""
     with db.conn_ctx() as conn:
         p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
         if not p:
             raise HTTPException(404, "项目不存在")
-        if p["status"] not in ("in_progress", "completed"):
-            raise HTTPException(400, "当前状态不可关闭")
+        if p["status"] != "in_progress":
+            raise HTTPException(400, "只有「进行中」的项目可以关闭（关闭会退回元件并删除项目）")
         its = conn.execute("SELECT * FROM project_items WHERE project_id=?", (pid,)).fetchall()
         for it in its:
             cid = it["component_id"]
             if not cid:
                 continue
-            # 退回应为当前占用数量（含确认时占用与采购自动补齐部分）
             ret = it["occupied"]
             if ret > 0:
                 c = conn.execute("SELECT * FROM components WHERE id=?", (cid,)).fetchone()
@@ -537,12 +609,45 @@ def api_project_close(pid: int):
                         "VALUES(?,?,?,?,?,?)",
                         (cid, ret, "return", pid, "项目关闭退回", db.now()),
                     )
+        conn.execute("DELETE FROM project_purchases WHERE project_id=?", (pid,))
+        conn.execute("DELETE FROM project_items WHERE project_id=?", (pid,))
+        conn.execute("DELETE FROM projects WHERE id=?", (pid,))
+        return {"ok": True, "deleted": pid}
+
+
+class CloneIn(BaseModel):
+    board_count: int = 1
+
+
+@app.post("/api/projects/{pid}/clone", status_code=201)
+def api_project_clone(pid: int, data: CloneIn):
+    """返单：以已完成项目为母项目，克隆出一个新的独立草稿项目。"""
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] != "completed":
+            raise HTTPException(400, "只有已完成的项目可以返单")
+        root = series_root(conn, pid)
+        cnt = conn.execute(
+            "SELECT COUNT(*) n FROM projects WHERE parent_project_id=?", (root,)
+        ).fetchone()["n"]
+        name = f"{p['name']} · 返单{cnt + 1}"
+        cur = conn.execute(
+            "INSERT INTO projects(name,status,created_at,board_count,loss_ratio,needs_pcb,"
+            "pcb_cost,needs_stencil,stencil_cost,other_cost,note,parent_project_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (name, "draft", db.now(), max(1, data.board_count), p["loss_ratio"],
+             p["needs_pcb"], 0, p["needs_stencil"], 0, p["other_cost"], p["note"], root),
+        )
+        npid = cur.lastrowid
+        for it in conn.execute("SELECT * FROM project_items WHERE project_id=?", (pid,)).fetchall():
             conn.execute(
-                "UPDATE project_items SET occupied=0, bought=0, bought_cost=0 WHERE id=?",
-                (it["id"],),
+                "INSERT INTO project_items(project_id,component_id,name,footprint,designator,qty_per_board) "
+                "VALUES(?,?,?,?,?,?)",
+                (npid, it["component_id"], it["name"], it["footprint"], it["designator"], it["qty_per_board"]),
             )
-        conn.execute("UPDATE projects SET status='closed', closed_at=? WHERE id=?", (db.now(), pid))
-        return project_detail(conn, pid)
+        return {"id": npid, "name": name}
 
 
 @app.post("/api/projects/{pid}/revenue")
@@ -575,6 +680,83 @@ def api_stock_logs(component_id: int = 0, limit: int = 300):
         params.append(min(int(limit), 1000))
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------- PCB/钢网采购
+@app.post("/api/projects/{pid}/purchases")
+def api_project_purchases_save(pid: int, data: PurchaseExtraIn):
+    if data.kind not in ("pcb", "stencil"):
+        raise HTTPException(400, "kind 必须是 pcb 或 stencil")
+    if data.qty <= 0:
+        raise HTTPException(400, "数量需要为正数")
+    with db.conn_ctx() as conn:
+        if not conn.execute("SELECT id FROM projects WHERE id=?", (pid,)).fetchone():
+            raise HTTPException(404, "项目不存在")
+        conn.execute(
+            "INSERT INTO project_purchases(project_id,kind,qty,cost,note,created_at) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(project_id,kind) DO UPDATE SET "
+            "qty=excluded.qty, cost=excluded.cost, note=excluded.note, created_at=excluded.created_at",
+            (pid, data.kind, data.qty, data.cost, data.note, db.now()),
+        )
+        return project_detail(conn, pid)
+
+
+@app.get("/api/purchases")
+def api_purchases_all():
+    with db.conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT x.*, p.name AS pname, p.status AS pstatus FROM project_purchases x "
+            "JOIN projects p ON p.id=x.project_id ORDER BY x.id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.get("/api/purchases/pending")
+def api_purchases_pending():
+    with db.conn_ctx() as conn:
+        projs = conn.execute(
+            "SELECT * FROM projects WHERE status IN ('in_progress','completed') "
+            "AND (needs_pcb=1 OR needs_stencil=1)"
+        ).fetchall()
+        out = []
+        for p in projs:
+            have = {r["kind"] for r in conn.execute(
+                "SELECT kind FROM project_purchases WHERE project_id=?", (p["id"],)
+            ).fetchall()}
+            if p["needs_pcb"] and "pcb" not in have:
+                out.append({"project_id": p["id"], "project_name": p["name"],
+                            "kind": "pcb", "name": "PCB打板", "qty": max(1, p["board_count"])})
+            if p["needs_stencil"] and "stencil" not in have:
+                out.append({"project_id": p["id"], "project_name": p["name"],
+                            "kind": "stencil", "name": "钢网", "qty": 1})
+        return out
+
+
+@app.get("/api/purchases/shortages")
+def api_purchases_shortages():
+    with db.conn_ctx() as conn:
+        rows = conn.execute(
+            "SELECT it.id, it.project_id, it.component_id, it.name, it.footprint, it.designator, "
+            "it.total_needed, it.occupied, it.bought, p.name AS pname "
+            "FROM project_items it JOIN projects p ON p.id=it.project_id "
+            "WHERE p.status IN ('in_progress','completed') AND it.total_needed>0"
+        ).fetchall()
+        out = []
+        for it in rows:
+            shortage = max(0, it["total_needed"] - it["occupied"] - it["bought"])
+            if shortage > 0:
+                out.append({
+                    "project_id": it["project_id"],
+                    "project_name": it["pname"],
+                    "item_id": it["id"],
+                    "name": it["name"],
+                    "footprint": it["footprint"],
+                    "needed": it["total_needed"],
+                    "occupied": it["occupied"],
+                    "bought": it["bought"],
+                    "shortage": shortage,
+                })
+        return out
 
 
 # ---------------------------------------------------------------- settings
@@ -611,21 +793,29 @@ def api_stats_overview():
             "JOIN projects p ON p.id=it.project_id"
         ).fetchall()
 
-        status_counts = {"draft": 0, "in_progress": 0, "completed": 0, "closed": 0}
+        status_counts = {"draft": 0, "in_progress": 0, "completed": 0}
         occupied = consumed = 0
         cost_active = cost_completed = 0.0
         revenue = 0.0
+        pending_pcb = pending_stencil = 0
         for p in proj:
             key = p["status"]
             status_counts[key] = status_counts.get(key, 0) + 1
-            ext = extra_cost(p)
             if key in ("in_progress", "completed"):
+                ext = extra_cost(conn, p["id"], p["other_cost"])
                 cost_active += ext
                 occupied += sum(
                     it["occupied"] for it in items if it["project_id"] == p["id"]
                 )
+                have = {r["kind"] for r in conn.execute(
+                    "SELECT kind FROM project_purchases WHERE project_id=?", (p["id"],)
+                ).fetchall()}
+                if p["needs_pcb"] and "pcb" not in have:
+                    pending_pcb += 1
+                if p["needs_stencil"] and "stencil" not in have:
+                    pending_stencil += 1
             if key == "completed":
-                cost_completed += ext
+                cost_completed += extra_cost(conn, p["id"], p["other_cost"])
                 consumed += sum(
                     it["total_needed"] for it in items if it["project_id"] == p["id"]
                 )
@@ -645,6 +835,8 @@ def api_stats_overview():
             "cost_completed": round(cost_completed, 2),
             "revenue": round(revenue, 2),
             "profit": round(revenue - cost_completed, 2),
+            "pending_pcb": pending_pcb,
+            "pending_stencil": pending_stencil,
             "project_counts": status_counts,
         }
 
