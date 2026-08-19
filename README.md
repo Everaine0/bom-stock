@@ -1,0 +1,49 @@
+# 元件仓 · 元器件库存 & 立创 BOM 对比工具
+
+一个局域网共享的 Web 工具：维护元件库存，上传立创 EDA 导出的 BOM，自动对比计算**剩余量 / 缺件**，
+支持同类型别名匹配（`0.1uF = 100nF = 104`），可配置损耗比、记录项目状态（草稿/进行中/已完成/已关闭）、
+采购入库、成本与收益统计、一键备份恢复。
+
+## 功能
+
+- **元件库**：名称+封装（忽略大小写）唯一；可维护同类型别名；手动入库/出库；单价
+- **BOM 导入**：解析立创导出的 `.xlsx` / `.csv`（含 Name / Designator / Footprint / Quantity 列）
+- **自动匹配**：名称+封装 → 用户别名 → 值归一化（`10kΩ=10K`、`0.1uF=100nF=104`），匹配不上的可手动改名绑定，或一键按 BOM 建新元件
+- **项目状态**：草稿 →（确认，占用库存）→ 进行中 → 已完成（可填收益）/ 已关闭（退回元件与成本）
+- **项目选项**：PCB 打板、钢网采购、其他费用（计入成本）
+- **损耗比**：全局默认，每个项目可覆盖；需求 = BOM数量 × 板数 × (1+损耗%) 向上取整
+- **总览**：库存总值、占用中、累计消耗、成本、收益、毛利、类别分布
+- **备份**：一键导出/导入 JSON（导入前自动留底）
+
+## 运行方式
+
+### 方式一：Docker（推荐）
+
+需要已安装 Docker / Docker Compose。
+
+```bash
+docker compose up -d --build
+```
+
+访问 `http://<本机IP>:8080`，同局域网设备可通过 `http://<本机IP>:8080` 访问。
+数据保存在宿主机 `./data/` 目录，整个复制即可备份。
+
+### 方式二：本机 Python 直接运行（无需 Docker）
+
+```bash
+pip install -r requirements.txt
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+# 或 Windows 双击后运行：
+set DATA_DIR=data
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+## 目录
+
+```
+app/            FastAPI 后端（db / matching / bom 解析 / main 路由）
+static/         前端（原生 HTML/CSS/JS，中文，无构建）
+data/           运行时生成的 SQLite 数据库（可整体备份）
+设想.md         需求原始设想
+BOM_*.xlsx      立创 BOM 示例
+```

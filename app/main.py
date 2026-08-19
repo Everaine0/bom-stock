@@ -1,0 +1,645 @@
+"""元件仓：元器件库存 & 立创 BOM 对比工具（FastAPI 后端）。"""
+import json
+import math
+import os
+import time
+from pathlib import Path
+from typing import List, Optional
+
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from . import bom as bom_mod
+from . import db
+from . import matching
+
+app = FastAPI(title="元件仓")
+db.init_db()
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+# ---------------------------------------------------------------- models
+class ComponentIn(BaseModel):
+    name: str
+    footprint: str = ""
+    category: str = "其他"
+    aliases: List[str] = []
+    unit_price: float = 0
+    note: str = ""
+
+
+class AdjustIn(BaseModel):
+    delta: int
+    note: str = ""
+
+
+class ProjectIn(BaseModel):
+    name: str
+    board_count: int = 1
+    loss_ratio: Optional[float] = None
+    needs_pcb: bool = False
+    pcb_cost: float = 0
+    needs_stencil: bool = False
+    stencil_cost: float = 0
+    other_cost: float = 0
+    note: str = ""
+
+
+class BindIn(BaseModel):
+    component_id: int = 0  # 0 表示解除绑定
+
+
+class PurchaseItem(BaseModel):
+    item_id: int
+    qty: int
+    unit_price: float = 0
+
+
+class PurchaseIn(BaseModel):
+    items: List[PurchaseItem] = []
+
+
+class RevenueIn(BaseModel):
+    revenue: Optional[float] = None
+
+
+class SettingsIn(BaseModel):
+    default_loss_ratio: float = 5
+
+
+# ---------------------------------------------------------------- helpers
+def row2d(r):
+    return dict(r) if r is not None else None
+
+
+def _find_dup(conn, name, footprint, exclude=None):
+    """按归一化名称+封装查找重复（忽略大小写与 Ω/µ 等符号差异）。"""
+    nn, nf = matching.norm(name), matching.norm(footprint)
+    rows = conn.execute("SELECT id, name, footprint FROM components").fetchall()
+    for c in rows:
+        if exclude is not None and c["id"] == exclude:
+            continue
+        if matching.norm(c["name"]) == nn and matching.norm(c["footprint"]) == nf:
+            return c
+    return None
+
+
+def get_loss_ratio(conn, p):
+    if hasattr(p, "keys"):
+        p = dict(p)
+    if p.get("loss_ratio") is not None:
+        return p["loss_ratio"]
+    try:
+        return float(db.get_setting("default_loss_ratio", "5"))
+    except Exception:
+        return 5.0
+
+
+def compute_needed(per_board, board_count, loss):
+    return max(0, math.ceil(per_board * board_count * (1 + loss / 100.0)))
+
+
+def extra_cost(p):
+    if hasattr(p, "keys"):
+        p = dict(p)
+    return (p.get("pcb_cost") or 0) + (p.get("stencil_cost") or 0) + (p.get("other_cost") or 0)
+
+
+def project_detail(conn, pid):
+    p = row2d(conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
+    if not p:
+        return None
+    loss = get_loss_ratio(conn, p)
+    items_raw = conn.execute(
+        "SELECT * FROM project_items WHERE project_id=? ORDER BY id", (pid,)
+    ).fetchall()
+    items, shortage_total, bought_cost = [], 0, 0.0
+    for r in items_raw:
+        it = dict(r)
+        comp = None
+        if it["component_id"]:
+            comp = row2d(
+                conn.execute("SELECT * FROM components WHERE id=?", (it["component_id"],)).fetchone()
+            )
+        if it["total_needed"]:
+            needed = it["total_needed"]
+        else:
+            needed = compute_needed(it["qty_per_board"], p["board_count"], loss)
+        shortage = max(0, needed - it["occupied"] - it["bought"])
+        shortage_total += shortage
+        bought_cost += it["bought_cost"] or 0
+        items.append({
+            "id": it["id"],
+            "component_id": it["component_id"],
+            "name": it["name"],
+            "footprint": it["footprint"],
+            "designator": it["designator"],
+            "qty_per_board": it["qty_per_board"],
+            "needed": needed,
+            "occupied": it["occupied"],
+            "bought": it["bought"],
+            "bought_cost": it["bought_cost"] or 0,
+            "shortage": shortage,
+            "component": {"id": comp["id"], "qty": comp["qty"]} if comp else None,
+        })
+    return {
+        "project": {**p, "loss_ratio_effective": loss},
+        "items": items,
+        "cost_bought": round(bought_cost, 2),
+        "cost_extra": round(extra_cost(p), 2),
+        "cost_total": round(bought_cost + extra_cost(p), 2),
+        "shortage_total": shortage_total,
+    }
+
+
+def project_with_cost(conn, p):
+    d = row2d(p)
+    bought = conn.execute(
+        "SELECT COALESCE(SUM(bought_cost),0) s FROM project_items WHERE project_id=?", (p["id"],)
+    ).fetchone()["s"]
+    d["cost_total"] = round((bought or 0) + extra_cost(d), 2)
+    d["item_count"] = conn.execute(
+        "SELECT COUNT(*) n FROM project_items WHERE project_id=?", (p["id"],)
+    ).fetchone()["n"]
+    return d
+
+
+# ---------------------------------------------------------------- health
+@app.get("/api/health")
+def api_health():
+    return {"status": "ok", "db": db.DB_PATH}
+
+
+# ---------------------------------------------------------------- components
+@app.get("/api/components")
+def api_components():
+    with db.conn_ctx() as conn:
+        rows = conn.execute("SELECT * FROM components ORDER BY name").fetchall()
+        return [row2d(r) for r in rows]
+
+
+@app.post("/api/components", status_code=201)
+def api_component_create(data: ComponentIn):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "名称不能为空")
+    with db.conn_ctx() as conn:
+        dup = _find_dup(conn, name, data.footprint)
+        if dup:
+            raise HTTPException(409, "已存在相同名称+封装的元件（注意不区分大小写）")
+        aliases = json.dumps([a.strip() for a in data.aliases if a.strip()], ensure_ascii=False)
+        cur = conn.execute(
+            "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note) "
+            "VALUES(?,?,?,?,0,?,?)",
+            (name, data.footprint.strip(), data.category, aliases, data.unit_price, data.note),
+        )
+        return {"id": cur.lastrowid}
+
+
+@app.put("/api/components/{cid}")
+def api_component_update(cid: int, data: ComponentIn):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "名称不能为空")
+    with db.conn_ctx() as conn:
+        if not conn.execute("SELECT id FROM components WHERE id=?", (cid,)).fetchone():
+            raise HTTPException(404, "元件不存在")
+        dup = _find_dup(conn, name, data.footprint, exclude=cid)
+        if dup:
+            raise HTTPException(409, "存在相同名称+封装的其它元件")
+        aliases = json.dumps([a.strip() for a in data.aliases if a.strip()], ensure_ascii=False)
+        conn.execute(
+            "UPDATE components SET name=?, footprint=?, category=?, aliases=?, unit_price=?, note=? WHERE id=?",
+            (name, data.footprint.strip(), data.category, aliases, data.unit_price, data.note, cid),
+        )
+        return {"ok": True}
+
+
+@app.delete("/api/components/{cid}")
+def api_component_delete(cid: int):
+    with db.conn_ctx() as conn:
+        if not conn.execute("SELECT id FROM components WHERE id=?", (cid,)).fetchone():
+            raise HTTPException(404, "元件不存在")
+        if conn.execute("SELECT id FROM project_items WHERE component_id=?", (cid,)).fetchone():
+            raise HTTPException(409, "该元件已被项目引用，无法删除（请先解除项目中的绑定）")
+        conn.execute("DELETE FROM stock_logs WHERE component_id=?", (cid,))
+        conn.execute("DELETE FROM components WHERE id=?", (cid,))
+        return {"ok": True}
+
+
+@app.post("/api/components/{cid}/adjust")
+def api_component_adjust(cid: int, data: AdjustIn):
+    if data.delta == 0:
+        raise HTTPException(400, "数量不能为 0")
+    with db.conn_ctx() as conn:
+        c = conn.execute("SELECT * FROM components WHERE id=?", (cid,)).fetchone()
+        if not c:
+            raise HTTPException(404, "元件不存在")
+        new = c["qty"] + data.delta
+        if new < 0:
+            raise HTTPException(400, f"库存不足，当前仅 {c['qty']}")
+        conn.execute("UPDATE components SET qty=? WHERE id=?", (new, cid))
+        conn.execute(
+            "INSERT INTO stock_logs(component_id,delta,type,note,created_at) VALUES(?,?,?,?,?)",
+            (cid, data.delta, "in" if data.delta > 0 else "out", data.note, db.now()),
+        )
+        return {"qty": new}
+
+
+# ---------------------------------------------------------------- projects
+@app.get("/api/projects")
+def api_projects():
+    with db.conn_ctx() as conn:
+        rows = conn.execute("SELECT * FROM projects ORDER BY created_at DESC, id DESC").fetchall()
+        return [project_with_cost(conn, r) for r in rows]
+
+
+@app.post("/api/projects", status_code=201)
+def api_project_create(data: ProjectIn):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(400, "项目名称不能为空")
+    with db.conn_ctx() as conn:
+        cur = conn.execute(
+            "INSERT INTO projects(name,status,created_at,board_count,loss_ratio,"
+            "needs_pcb,pcb_cost,needs_stencil,stencil_cost,other_cost,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (name, "draft", db.now(), max(1, data.board_count), data.loss_ratio,
+             int(data.needs_pcb), data.pcb_cost, int(data.needs_stencil), data.stencil_cost,
+             data.other_cost, data.note),
+        )
+        return {"id": cur.lastrowid}
+
+
+@app.get("/api/projects/{pid}")
+def api_project_get(pid: int):
+    with db.conn_ctx() as conn:
+        d = project_detail(conn, pid)
+        if not d:
+            raise HTTPException(404, "项目不存在")
+        return d
+
+
+@app.put("/api/projects/{pid}")
+def api_project_update(pid: int, data: ProjectIn):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        board_count = p["board_count"]
+        loss_ratio = p["loss_ratio"]
+        if data.name.strip():
+            conn.execute("UPDATE projects SET name=? WHERE id=?", (data.name.strip(), pid))
+        # 草稿阶段允许改板数与损耗比（影响未确认的需求量）
+        if p["status"] == "draft":
+            board_count = max(1, data.board_count)
+            loss_ratio = data.loss_ratio
+        conn.execute(
+            "UPDATE projects SET board_count=?, loss_ratio=?, needs_pcb=?, pcb_cost=?, "
+            "needs_stencil=?, stencil_cost=?, other_cost=?, note=? WHERE id=?",
+            (board_count, loss_ratio, int(data.needs_pcb), data.pcb_cost,
+             int(data.needs_stencil), data.stencil_cost, data.other_cost, data.note, pid),
+        )
+        return project_detail(conn, pid)
+
+
+@app.delete("/api/projects/{pid}")
+def api_project_delete(pid: int):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] != "draft":
+            raise HTTPException(400, "只有草稿项目可以删除")
+        conn.execute("DELETE FROM project_items WHERE project_id=?", (pid,))
+        conn.execute("DELETE FROM projects WHERE id=?", (pid,))
+        return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/bom")
+async def api_project_bom(pid: int, file: UploadFile = File(...)):
+    fn = (file.filename or "").lower()
+    raw = await file.read()
+    try:
+        rows = bom_mod.parse_csv(raw) if fn.endswith(".csv") else bom_mod.parse_xlsx(raw)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"BOM 解析失败：{e}")
+    if not rows:
+        raise HTTPException(400, "未能识别出 BOM 数据（需要 Name/数量 等列）")
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        comps = [dict(c) for c in conn.execute("SELECT * FROM components").fetchall()]
+        conn.execute("DELETE FROM project_items WHERE project_id=?", (pid,))
+        matched = 0
+        for r in rows:
+            cid, how = None, None
+            for c in comps:
+                res = matching.match_row(r["name"], r["footprint"], c)
+                if res:
+                    cid, how = c["id"], res
+                    break
+            conn.execute(
+                "INSERT INTO project_items(project_id,component_id,name,footprint,designator,qty_per_board) "
+                "VALUES(?,?,?,?,?,?)",
+                (pid, cid, r["name"], r["footprint"], r["designator"], r["qty"]),
+            )
+            if cid:
+                matched += 1
+        return {"matched": matched, "total": len(rows)}
+
+
+@app.post("/api/projects/{pid}/items/{iid}/bind")
+def api_item_bind(pid: int, iid: int, data: BindIn):
+    with db.conn_ctx() as conn:
+        it = conn.execute(
+            "SELECT * FROM project_items WHERE id=? AND project_id=?", (iid, pid)
+        ).fetchone()
+        if not it:
+            raise HTTPException(404, "BOM 条目不存在")
+        if data.component_id <= 0:
+            conn.execute("UPDATE project_items SET component_id=NULL WHERE id=?", (iid,))
+        else:
+            if not conn.execute("SELECT id FROM components WHERE id=?", (data.component_id,)).fetchone():
+                raise HTTPException(404, "元件不存在")
+            conn.execute("UPDATE project_items SET component_id=? WHERE id=?", (data.component_id, iid))
+        return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/items/{iid}/newcomponent", status_code=201)
+def api_item_newcomponent(pid: int, iid: int):
+    with db.conn_ctx() as conn:
+        it = conn.execute(
+            "SELECT * FROM project_items WHERE id=? AND project_id=?", (iid, pid)
+        ).fetchone()
+        if not it:
+            raise HTTPException(404, "BOM 条目不存在")
+        name = it["name"]
+        foot = it["footprint"]
+        dup = conn.execute(
+            "SELECT id FROM components WHERE lower(name)=? AND lower(footprint)=?",
+            (matching.norm(name), matching.norm(foot)),
+        ).fetchone()
+        if dup:
+            cid = dup["id"]
+        else:
+            cur = conn.execute(
+                "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note) "
+                "VALUES(?,?,?,?,0,0,'从BOM创建')",
+                (name, foot, "其他", "[]"),
+            )
+            cid = cur.lastrowid
+        conn.execute("UPDATE project_items SET component_id=? WHERE id=?", (cid, iid))
+        return {"component_id": cid}
+
+
+@app.post("/api/projects/{pid}/confirm")
+def api_project_confirm(pid: int):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] != "draft":
+            raise HTTPException(400, "只有草稿项目可以确认")
+        its = conn.execute("SELECT * FROM project_items WHERE project_id=?", (pid,)).fetchall()
+        for it in its:
+            if it["component_id"] is None:
+                raise HTTPException(400, f"存在未匹配元件：{it['name']}，请先在列表中绑定")
+        loss = get_loss_ratio(conn, p)
+        for it in its:
+            need = compute_needed(it["qty_per_board"], p["board_count"], loss)
+            c = conn.execute("SELECT * FROM components WHERE id=?", (it["component_id"],)).fetchone()
+            take = min(c["qty"], need)
+            conn.execute(
+                "UPDATE components SET qty=? WHERE id=?",
+                (c["qty"] - take, it["component_id"]),
+            )
+            conn.execute(
+                "UPDATE project_items SET total_needed=?, occupied=? WHERE id=?",
+                (need, take, it["id"]),
+            )
+            if take > 0:
+                conn.execute(
+                    "INSERT INTO stock_logs(component_id,delta,type,project_id,note,created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (it["component_id"], -take, "occupy", pid, "项目占用", db.now()),
+                )
+        conn.execute("UPDATE projects SET status='in_progress' WHERE id=?", (pid,))
+        return project_detail(conn, pid)
+
+
+@app.post("/api/projects/{pid}/purchase")
+def api_project_purchase(pid: int, data: PurchaseIn):
+    if not data.items:
+        raise HTTPException(400, "没有购买条目")
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] not in ("in_progress", "completed"):
+            raise HTTPException(400, "当前状态不允许采购")
+        for it in data.items:
+            row = conn.execute(
+                "SELECT * FROM project_items WHERE id=? AND project_id=?", (it.item_id, pid)
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "BOM 条目不存在")
+            if it.qty <= 0:
+                raise HTTPException(400, "购买数量需要为正数")
+            if row["component_id"] is None:
+                raise HTTPException(400, "该条目未绑定元件，无法采购")
+            c = conn.execute("SELECT * FROM components WHERE id=?", (row["component_id"],)).fetchone()
+            conn.execute(
+                "UPDATE components SET qty=? WHERE id=?",
+                (c["qty"] + it.qty, row["component_id"]),
+            )
+            conn.execute(
+                "UPDATE project_items SET bought=bought+?, bought_cost=bought_cost+? WHERE id=?",
+                (it.qty, it.qty * it.unit_price, row["id"]),
+            )
+            conn.execute(
+                "INSERT INTO stock_logs(component_id,delta,type,project_id,note,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (row["component_id"], it.qty, "purchase", pid, "项目采购", db.now()),
+            )
+        return project_detail(conn, pid)
+
+
+@app.post("/api/projects/{pid}/complete")
+def api_project_complete(pid: int):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] != "in_progress":
+            raise HTTPException(400, "仅进行中的项目可以完成")
+        conn.execute("UPDATE projects SET status='completed' WHERE id=?", (pid,))
+        return project_detail(conn, pid)
+
+
+@app.post("/api/projects/{pid}/close")
+def api_project_close(pid: int):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] not in ("in_progress", "completed"):
+            raise HTTPException(400, "当前状态不可关闭")
+        its = conn.execute("SELECT * FROM project_items WHERE project_id=?", (pid,)).fetchall()
+        for it in its:
+            cid = it["component_id"]
+            if not cid:
+                continue
+            ret = it["occupied"] + it["bought"]
+            if ret > 0:
+                c = conn.execute("SELECT * FROM components WHERE id=?", (cid,)).fetchone()
+                if c:
+                    conn.execute(
+                        "UPDATE components SET qty=? WHERE id=?",
+                        (c["qty"] + ret, cid),
+                    )
+                    conn.execute(
+                        "INSERT INTO stock_logs(component_id,delta,type,project_id,note,created_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (cid, ret, "return", pid, "项目关闭退回", db.now()),
+                    )
+            conn.execute(
+                "UPDATE project_items SET occupied=0, bought=0, bought_cost=0 WHERE id=?",
+                (it["id"],),
+            )
+        conn.execute("UPDATE projects SET status='closed', closed_at=? WHERE id=?", (db.now(), pid))
+        return project_detail(conn, pid)
+
+
+@app.post("/api/projects/{pid}/revenue")
+def api_project_revenue(pid: int, data: RevenueIn):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] not in ("in_progress", "completed"):
+            raise HTTPException(400, "当前状态不可填写收益")
+        conn.execute("UPDATE projects SET revenue=? WHERE id=?", (data.revenue, pid))
+        return project_detail(conn, pid)
+
+
+# ---------------------------------------------------------------- settings
+@app.get("/api/settings")
+def api_settings():
+    try:
+        return {"default_loss_ratio": float(db.get_setting("default_loss_ratio", "5"))}
+    except Exception:
+        return {"default_loss_ratio": 5.0}
+
+
+@app.put("/api/settings")
+def api_settings_update(data: SettingsIn):
+    if data.default_loss_ratio < 0:
+        raise HTTPException(400, "损耗比不能为负数")
+    db.set_setting("default_loss_ratio", data.default_loss_ratio)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- stats
+@app.get("/api/stats/overview")
+def api_stats_overview():
+    with db.conn_ctx() as conn:
+        inv = conn.execute(
+            "SELECT COALESCE(SUM(qty),0) q, COUNT(*) n, COALESCE(SUM(qty*unit_price),0) v FROM components"
+        ).fetchone()
+        cats = conn.execute(
+            "SELECT category, COUNT(*) n, COALESCE(SUM(qty),0) q "
+            "FROM components GROUP BY category ORDER BY q DESC"
+        ).fetchall()
+        proj = conn.execute("SELECT * FROM projects").fetchall()
+        items = conn.execute(
+            "SELECT it.*, p.status AS st FROM project_items it "
+            "JOIN projects p ON p.id=it.project_id"
+        ).fetchall()
+
+        status_counts = {"draft": 0, "in_progress": 0, "completed": 0, "closed": 0}
+        occupied = consumed = 0
+        cost_active = cost_completed = 0.0
+        revenue = 0.0
+        for p in proj:
+            key = p["status"]
+            status_counts[key] = status_counts.get(key, 0) + 1
+            ext = extra_cost(p)
+            if key in ("in_progress", "completed"):
+                cost_active += ext
+                occupied += sum(
+                    it["occupied"] for it in items if it["project_id"] == p["id"]
+                )
+            if key == "completed":
+                cost_completed += ext
+                consumed += sum(
+                    it["total_needed"] for it in items if it["project_id"] == p["id"]
+                )
+                if p["revenue"] is not None:
+                    revenue += p["revenue"]
+        cost_active += sum(it["bought_cost"] for it in items if it["st"] in ("in_progress", "completed"))
+        cost_completed += sum(it["bought_cost"] for it in items if it["st"] == "completed")
+
+        return {
+            "inventory_qty": inv["q"],
+            "inventory_count": inv["n"],
+            "inventory_value": round(inv["v"], 2),
+            "by_category": [{"category": c["category"], "count": c["n"], "qty": c["q"]} for c in cats],
+            "occupied": occupied,
+            "consumed": consumed,
+            "cost_active": round(cost_active, 2),
+            "cost_completed": round(cost_completed, 2),
+            "revenue": round(revenue, 2),
+            "profit": round(revenue - cost_completed, 2),
+            "project_counts": status_counts,
+        }
+
+
+# ---------------------------------------------------------------- backup
+@app.get("/api/backup")
+def api_backup_export():
+    data = db.dump_all()
+    data = {
+        "app": "bom-stock",
+        "version": 1,
+        "exported_at": db.now(),
+        **data,
+    }
+    body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="bom-stock-backup.json"'},
+    )
+
+
+@app.post("/api/backup/import")
+async def api_backup_import(file: UploadFile = File(...)):
+    raw = await file.read()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(400, f"备份文件不是有效 JSON：{e}")
+    if data.get("app") != "bom-stock":
+        raise HTTPException(400, "不是本工具的备份文件")
+    # 导入前先把当前数据备份为时间戳文件
+    try:
+        bak = db.dump_all()
+        bakname = os.path.join(db.DATA_DIR, f"pre-import-{int(time.time())}.json")
+        with open(bakname, "w", encoding="utf-8") as f:
+            json.dump(bak, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    db.restore_all(data)
+    return {"ok": True, "restored_components": len(data.get("components", []))}
+
+
+# ---------------------------------------------------------------- static
+if STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
