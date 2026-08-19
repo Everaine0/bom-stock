@@ -2,24 +2,76 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>元件仓 · 元器件库存 & BOM 管理</title>
 <link rel="stylesheet" href="/style.css">
+<script>
+/* 首屏前应用主题，避免闪烁 */
+(function () {
+  var t = (location.search.match(/[?&]theme=(light|dark)/) || [])[1];
+  if (t !== 'light' && t !== 'dark') t = localStorage.getItem('bom-theme');
+  if (t !== 'light' && t !== 'dark') {
+    t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+  }
+  document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
 </head>
 <body>
+<header id="topbar">
+  <button class="icon-btn" id="menu-btn" aria-label="菜单">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+  </button>
+  <div class="logo" id="topbar-logo">元件<b>仓</b></div>
+  <button class="icon-btn theme-toggle" id="theme-btn-mobile" aria-label="切换主题">
+    <svg class="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M4.9 19.1l1.7-1.7M17.4 6.6l1.7-1.7"/></svg>
+    <svg class="i-moon" viewBox="0 0 24 24"><path d="M20.6 14.2A8.5 8.5 0 0 1 9.8 3.4a8.5 8.5 0 1 0 10.8 10.8z"/></svg>
+  </button>
+</header>
 <aside id="sidebar">
-  <div class="logo">元件仓</div>
-  <div class="logo-sub">库存 · BOM · 项目</div>
+  <div class="sidebar-head">
+    <div class="logo">元件<b>仓</b></div>
+    <div class="logo-sub">元器件库存 · BOM · 项目</div>
+  </div>
   <nav id="nav">
-    <button data-view="overview" class="active">总览</button>
-    <button data-view="components">元件库</button>
-    <button data-view="logs">流水</button>
-    <button data-view="purchases">采购</button>
-    <button data-view="projects">项目</button>
-    <button data-view="settings">设置</button>
-    <button data-view="backup">备份</button>
+    <button data-view="overview" class="active">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></svg>
+      <span>总览</span>
+    </button>
+    <button data-view="components">
+      <svg viewBox="0 0 24 24"><path d="M12 3.2 19.4 7.2 12 11.2 4.6 7.2 12 3.2z"/><path d="M4.6 12.2 12 16.2l7.4-4"/><path d="M4.6 16.4 12 20.4l7.4-4"/></svg>
+      <span>元件库</span>
+    </button>
+    <button data-view="logs">
+      <svg viewBox="0 0 24 24"><path d="M12 20V4"/><path d="m7.5 8 4.5-4.5L16.5 8"/><path d="m7.5 16 4.5 4.5L16.5 16"/></svg>
+      <span>流水</span>
+    </button>
+    <button data-view="purchases">
+      <svg viewBox="0 0 24 24"><circle cx="9.2" cy="20" r="1.5"/><circle cx="17" cy="20" r="1.5"/><path d="M3 4h2l2.3 11.2h9.6L19 8H5.9"/></svg>
+      <span>采购</span>
+    </button>
+    <button data-view="projects">
+      <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.2"/><path d="M3 9.5h18M9 5v14"/></svg>
+      <span>项目</span>
+    </button>
+    <button data-view="settings">
+      <svg viewBox="0 0 24 24"><path d="M4 7h8.5M17 7h3M4 12h3M11.5 12H20M4 17h8.5M17 17h3"/><circle cx="15" cy="7" r="2"/><circle cx="9.5" cy="12" r="2"/><circle cx="15" cy="17" r="2"/></svg>
+      <span>设置</span>
+    </button>
+    <button data-view="backup">
+      <svg viewBox="0 0 24 24"><path d="M12 9v7"/><path d="m8.8 13.2 3.2 3.2 3.2-3.2"/><path d="M4.5 17.5v1.8a1.7 1.7 0 0 0 1.7 1.7h11.6a1.7 1.7 0 0 0 1.7-1.7v-1.8"/><path d="M8 8.5 12 4.5l4 4"/></svg>
+      <span>备份</span>
+    </button>
   </nav>
+  <div class="sidebar-foot">
+    <button class="theme-toggle theme-btn" id="theme-btn-desktop">
+      <svg class="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M4.9 19.1l1.7-1.7M17.4 6.6l1.7-1.7"/></svg>
+      <svg class="i-moon" viewBox="0 0 24 24"><path d="M20.6 14.2A8.5 8.5 0 0 1 9.8 3.4a8.5 8.5 0 1 0 10.8 10.8z"/></svg>
+      <span class="theme-label">浅色</span>
+    </button>
+  </div>
 </aside>
+<div id="scrim"></div>
 <main id="main">
   <div class="loading">加载中…</div>
 </main>

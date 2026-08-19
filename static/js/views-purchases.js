@@ -26,8 +26,8 @@ window.Views.purchases = {
         '<td class="num"><b style="color:var(--danger)">' + U.fmtNum(s.shortage) + '</b><div class="small muted">需 ' + U.fmtNum(s.needed) + ' / 已' + U.fmtNum(s.occupied + s.bought) + '</div></td>' +
         '<td><button class="btn sm p-buy">采购</button></td></tr>';
     }
-    let html = '<div class="card"><h2>① 待采购元件（缺件）</h2>' +
-      '<table><thead><tr><th>项目</th><th>元件 / 封装</th><th class="num">缺件</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    let html = '<div class="card"><h2>待采购元件</h2>' +
+      '<div class="table-wrap"><table><thead><tr><th>项目</th><th>元件 / 封装</th><th class="num">缺件</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 
     // —— PCB / 钢网 ——
     rows = '';
@@ -38,10 +38,10 @@ window.Views.purchases = {
         '<td>' + U.esc(p.project_name) + '</td>' +
         '<td><span class="tag org">' + kindName[p.kind] + '</span></td>' +
         '<td class="num">×' + U.fmtNum(p.qty) + '</td>' +
-        '<td><button class="btn sm p-px">记录采购(填成本)</button></td></tr>';
+        '<td><button class="btn sm p-px">记录成本</button></td></tr>';
     }
-    html += '<div class="card"><h2>② 待采购 PCB / 钢网</h2>' +
-      '<table><thead><tr><th>项目</th><th>类型</th><th class="num">数量</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    html += '<div class="card"><h2>待采购 PCB / 钢网</h2>' +
+      '<div class="table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th class="num">数量</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 
     // —— 已采购 ——
     rows = '';
@@ -51,8 +51,8 @@ window.Views.purchases = {
         '<td class="num">' + U.fmtNum(x.qty) + '</td><td class="num">' + U.fmtMoney(x.cost) + '</td>' +
         '<td class="small muted">' + U.esc(x.created_at) + (x.note ? ' · ' + U.esc(x.note) : '') + '</td></tr>';
     }
-    html += '<div class="card"><h2>③ 已采购记录（PCB / 钢网）</h2>' +
-      '<table><thead><tr><th>项目</th><th>类型</th><th class="num">数量</th><th class="num">成本</th><th>时间</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    html += '<div class="card"><h2>采购记录</h2>' +
+      '<div class="table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th class="num">数量</th><th class="num">成本</th><th>时间</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 
     container.innerHTML = html;
     this.bind(container);

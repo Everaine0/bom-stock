@@ -19,17 +19,18 @@ window.Views.logs = {
     this.preset = 0;
 
     container.innerHTML =
-      '<div class="card"><h2>出入库流水 <span class="sub">入库 / 出库 / 项目占用 / 采购 / 退回</span></h2>' +
+      '<div class="card"><h2>出入库流水</h2>' +
       '<div class="bar" style="margin-bottom:12px">' +
       '<select id="lg-cid" style="max-width:320px"><option value="0">全部元件</option>' + opts + '</select>' +
       '<select id="lg-type" style="max-width:160px">' +
       '<option value="">全部类型</option>' +
       Object.keys(typeName).map(t => '<option value="' + t + '">' + typeName[t] + '</option>').join('') +
       '</select>' +
-      '<button class="btn sm" id="lg-set">刷新</button>' +
+      '<span class="spacer"></span>' +
+      '<button class="btn sm ghost" id="lg-set">刷新</button>' +
       '</div>' +
-      '<table><thead><tr><th>时间</th><th>元件</th><th>类型</th><th class="num">数量</th><th>项目</th><th>备注</th></tr></thead>' +
-      '<tbody id="lg-tbody">' + this.rows(logs, 0, '') + '</tbody></table></div>';
+      '<div class="table-wrap"><table><thead><tr><th>时间</th><th>元件</th><th>类型</th><th class="num">数量</th><th>项目</th><th>备注</th></tr></thead>' +
+      '<tbody id="lg-tbody">' + this.rows(logs, 0, '') + '</tbody></table></div></div>';
 
     const tbody = container.querySelector('#lg-tbody');
     const apply = () => {

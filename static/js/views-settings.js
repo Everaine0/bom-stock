@@ -9,12 +9,11 @@ window.Views.settings = {
     catch (e) { container.innerHTML = '<div class="danger-box">加载失败：' + U.esc(e.message) + '</div>'; return; }
     container.innerHTML =
       '<div class="card" style="max-width:560px"><h2>设置</h2>' +
-      '<label class="f">全局损耗比 %<small class="muted">（新建项目默认使用；每个项目可单独覆盖）</small>' +
+      '<label class="f">全局损耗比 %<small class="muted">（新建项目默认，可单独覆盖）</small>' +
       '<input type="number" id="s-loss" min="0" step="0.1" value="' + s.default_loss_ratio + '"></label>' +
-      '<label class="f">低库存预警阈值（件）<small class="muted">（元件库存 ≤ 此值时在元件库标红/筛选，默认 0）</small>' +
+      '<label class="f">低库存预警阈值（件）' +
       '<input type="number" id="s-low" min="0" step="1" value="' + s.low_stock_threshold + '"></label>' +
-      '<div class="bar"><button class="btn primary" id="s-save">保存</button></div>' +
-      '<div class="hint">说明：需求量 = BOM数量 × 板数 × (1 + 损耗%)，向上取整；缺件与扣库存均按此计算。采购页负责"待采购"，元件库的"低库存"只反映库存健康度。</div>' +
+      '<button class="btn primary" id="s-save">保存</button>' +
       '</div>';
     container.querySelector('#s-save').addEventListener('click', async () => {
       const v = Number(document.getElementById('s-loss').value || 0);
@@ -32,14 +31,31 @@ window.Views.backup = {
   async render(container) {
     container.innerHTML =
       '<div class="card" style="max-width:560px"><h2>数据备份 / 恢复</h2>' +
-      '<p class="muted small">导出的 JSON 包含元件库、出入库流水、全部项目与设置。恢复会<b>整体替换</b>当前数据（恢复前会自动在当前数据目录留一份 pre-import 备份）。</p>' +
-      '<div class="bar" style="margin:14px 0 8px"><a class="btn primary" href="/api/backup">⬇ 导出备份 JSON</a></div>' +
-      '<div class="bar"><input type="file" id="bk-file" accept=".json"><button class="btn" id="bk-import">恢复此备份</button></div>' +
-      '<div class="hint">数据文件位于运行目录的 data/ 下（Docker 模式挂载到宿主机 ./data/），整个复制该目录也可离线备份。</div>' +
+      '<div class="bar" style="margin-bottom:18px"><a class="btn primary" href="/api/backup">⬇ 导出备份</a></div>' +
+      '<div class="dropzone" id="bk-dz">' +
+      '<svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v7"/><path d="m8.8 13.2 3.2 3.2 3.2-3.2"/><path d="M12 3v6"/><path d="M5 9h2l2-3 2 4h2l1.5-2h4.5"/><path d="M4.5 15.5v1.8a1.7 1.7 0 0 0 1.7 1.7h11.6a1.7 1.7 0 0 0 1.7-1.7v-1.8"/></svg>' +
+      '<div class="dz-name muted">选择备份 JSON 文件恢复</div>' +
+      '<input type="file" id="bk-file" accept=".json" style="display:none">' +
+      '</div>' +
+      '<div class="bar" style="margin-top:14px;display:none" id="bk-actions">' +
+      '<span class="muted small" id="bk-name"></span><span class="spacer"></span>' +
+      '<button class="btn danger" id="bk-import">恢复此备份</button></div>' +
       '</div>';
+
+    const dz = container.querySelector('#bk-dz');
+    const fileInput = container.querySelector('#bk-file');
+    const actions = container.querySelector('#bk-actions');
+    const nameEl = container.querySelector('#bk-name');
+    dz.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files[0];
+      if (!f) return;
+      nameEl.textContent = f.name;
+      actions.style.display = 'flex';
+    });
     container.querySelector('#bk-import').addEventListener('click', async () => {
-      const file = document.getElementById('bk-file').files[0];
-      if (!file) { U.toast('请先选择备份 JSON 文件', 'warn'); return; }
+      const file = fileInput.files[0];
+      if (!file) return;
       if (!await U.confirmDlg('将用该备份整体替换当前数据，确定继续？')) return;
       const fd = new FormData();
       fd.append('file', file);

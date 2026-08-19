@@ -29,13 +29,12 @@ window.Views.projects = {
       const kids = childrenBy[r.id] || [];
       rows += kids.map(k => this.listRow(k, [], true)).join('');
     }
-    if (!rows) rows = '<tr><td colspan="8" class="empty">还没有项目，点击右上角创建一个吧（可上传立创 BOM）</td></tr>';
+    if (!rows) rows = '<tr><td colspan="8" class="empty">还没有项目，点击「新建项目」创建</td></tr>';
 
     container.innerHTML =
-      '<div class="card"><h2>项目 <span class="sub">板数 × BOM数量 × (1+损耗) = 需求量</span></h2>' +
-      '<div class="bar" style="margin-bottom:12px"><button class="btn primary" id="p-new">+ 新建项目</button>' +
-      '<span class="muted small">草稿可删除；确认后「进行中」，可「完成」(需缺件补齐) 或「关闭并删除」(退回元件)</span></div>' +
-      '<table><thead><tr><th>名称</th><th>状态</th><th class="num">板数</th><th class="num">损耗</th><th class="num">BOM行</th><th class="num">成本</th><th>创建时间</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      '<div class="card"><h2>项目</h2>' +
+      '<div class="bar" style="margin-bottom:12px"><button class="btn primary" id="p-new">＋ 新建项目</button></div>' +
+      '<div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th class="num">板数</th><th class="num">损耗</th><th class="num">BOM行</th><th class="num">成本</th><th>创建时间</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 
     container.querySelector('#p-new').addEventListener('click', () => this.newProject());
     const self = this;
@@ -177,11 +176,10 @@ window.Views.projects = {
       '<span class="muted small">创建于 ' + U.esc(p.created_at) + '</span>' +
       (isDone ? '<button class="btn sm" id="pd-profit">' + (p.revenue == null ? '填写收益' : '修改收益') + '</button>' : '') +
       (isDone ? '<button class="btn sm primary" id="pd-redo">↻ 返单</button>' : '') +
-      (p.status === 'in_progress' ? '<button class="btn sm danger" id="pd-close">关闭并删除</button>' : '') +
       '</div></div>';
 
     // 项目信息
-    out += '<div class="card"><h2>项目信息 <span class="sub">板数 × BOM数量 × (1+损耗) = 需求量</span></h2>';
+    out += '<div class="card"><h2>项目信息</h2>';
     if (isDraft) {
       out += '<div class="bar">' +
         '<span>板数 <b>' + U.fmtNum(p.board_count) + '</b></span>' +
@@ -204,9 +202,15 @@ window.Views.projects = {
 
     // BOM 上传 / 物料对比表
     if (isDraft) {
-      out += '<div class="card"><h2>上传 BOM <span class="sub">立创 .xlsx/.csv；重新上传会覆盖</span></h2>' +
-        '<div class="bar"><input type="file" id="pd-bom" accept=".xlsx,.xls,.csv"><button class="btn primary" id="pd-bomgo">上传并解析</button>' +
-        '<span class="muted small">匹配：名称+封装 → 别名 → 值归一化；新建元件自动按位号分类(如 R→电阻)</span></div>' +
+      out += '<div class="card"><h2>上传 BOM <span class="sub">立创 .xlsx / .csv</span></h2>' +
+        '<div class="dropzone" id="pd-dz">' +
+        '<svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4"/><path d="m7.5 8.5 4.5-4.5 4.5 4.5"/><path d="M4.5 15.5v1.8a1.7 1.7 0 0 0 1.7 1.7h11.6a1.7 1.7 0 0 0 1.7-1.7v-1.8"/></svg>' +
+        '<div class="dz-name muted">点击选择 BOM 文件<br><span class="small">支持 .xlsx / .csv，重新上传会覆盖</span></div>' +
+        '<input type="file" id="pd-bom" accept=".xlsx,.xls,.csv" style="display:none">' +
+        '</div>' +
+        '<div class="bar" style="margin-top:14px;display:none" id="pd-bomgo-row">' +
+        '<span class="muted small" id="pd-bom-file"></span><span class="spacer"></span>' +
+        '<button class="btn primary" id="pd-bomgo">解析 BOM</button></div>' +
         '<div id="pd-bom-result" class="hint"></div></div>';
     } else {
       out += '<div class="card"><h2>物料清单</h2>';
@@ -249,15 +253,15 @@ window.Views.projects = {
         '<td>' + actCell + '</td>' +
         '</tr>';
     }
-    if (!itemsHtml) itemsHtml = '<tr><td colspan="10" class="empty">尚未上传 BOM' + (isDraft ? '，请上传立创 BOM 文件' : '') + '</td></tr>';
-    out += '<table><thead><tr>' +
+    if (!itemsHtml) itemsHtml = '<tr><td colspan="10" class="empty">尚未上传 BOM' + (isDraft ? '，请先上传立创 BOM 文件' : '') + '</td></tr>';
+    out += '<div class="table-wrap"><table><thead><tr>' +
       '<th>#</th><th>元件 / 封装</th><th>位号</th><th class="num">单板量</th><th class="num">需求量</th>' +
       '<th class="num">已占用</th><th class="num">已购买</th><th class="num">缺件</th><th>库存匹配</th><th>操作</th>' +
-      '</tr></thead><tbody>' + itemsHtml + '</tbody></table>' +
+      '</tr></thead><tbody>' + itemsHtml + '</tbody></table></div>' +
       '<div class="bar" style="margin-top:10px"><span class="muted small">缺件合计：<b style="color:var(--danger)">' + U.fmtNum(d.shortage_total) + '</b> 件</span></div></div>';
 
     // PCB / 钢网采购
-    out += '<div class="card"><h2>PCB / 钢网采购 <span class="sub">成本在采购时填写</span></h2>';
+    out += '<div class="card"><h2>PCB / 钢网采购</h2>';
     const kindName = { pcb: 'PCB打板', stencil: '钢网' };
     if (d.purchases.length) {
       out += '<table><thead><tr><th>类型</th><th class="num">数量</th><th class="num">成本</th><th>备注</th><th>时间</th></tr></thead><tbody>';
@@ -271,10 +275,10 @@ window.Views.projects = {
     if (d.pending_purchases.length && isAct) {
       for (const pp of d.pending_purchases) {
         out += '<div class="bar" style="margin-top:8px"><span class="tag org">待采购 ' + pp.name + ' ×' + U.fmtNum(pp.qty) + '</span>' +
-          '<button class="btn sm px-buy" data-kind="' + pp.kind + '" data-qty="' + pp.qty + '">记录' + pp.name + '采购(填成本)</button></div>';
+          '<button class="btn sm px-buy" data-kind="' + pp.kind + '" data-qty="' + pp.qty + '">记录成本</button></div>';
       }
     } else if (isDraft) {
-      out += '<div class="muted small">确认项目后，可在此记录 PCB / 钢网的实际采购成本。</div>';
+      out += '<div class="muted small">确认项目后，在此记录实际采购成本。</div>';
     }
     out += '</div>';
 
@@ -293,8 +297,8 @@ window.Views.projects = {
           '<td class="num">' + (m.revenue == null ? '—' : U.fmtMoney(m.revenue)) + '</td>' +
           '<td class="num">' + (m.revenue == null ? '—' : U.fmtMoney(m.revenue - m.cost_total)) + '</td></tr>';
       }
-      out += '<div class="card"><h2>返单系列 <span class="sub">同系列全部批次</span></h2>' +
-        '<table><thead><tr><th>批次</th><th>状态</th><th class="num">板数</th><th class="num">成本</th><th class="num">收益</th><th class="num">毛利</th></tr></thead><tbody>' + srows + '</tbody></table>' +
+      out += '<div class="card"><h2>返单系列</h2>' +
+        '<div class="table-wrap"><table><thead><tr><th>批次</th><th>状态</th><th class="num">板数</th><th class="num">成本</th><th class="num">收益</th><th class="num">毛利</th></tr></thead><tbody>' + srows + '</tbody></table></div>' +
         '<div class="bar" style="margin-top:10px"><span class="muted small">系列合计：成本 ' + U.fmtMoney(s.total_cost) + ' · 收益 ' + U.fmtMoney(s.total_revenue) + ' · 毛利 <b>' + U.fmtMoney(s.total_profit) + '</b></span></div>' +
         '</div>';
       // 收益趋势（简单文字）
@@ -309,24 +313,46 @@ window.Views.projects = {
     if (isDraft) {
       const unbound = d.items.filter(i => !i.component_id).length;
       out += '<div class="card"><div class="bar">' +
-        '<button class="btn green" id="pd-confirm"' + (unbound || !d.items.length ? ' disabled' : '') + '>✓ 确认项目（占用库存，进入进行中）</button>' +
+        '<button class="btn green" id="pd-confirm"' + (unbound || !d.items.length ? ' disabled' : '') + '>✓ 确认项目</button>' +
         (unbound ? '<span class="muted small">还有 ' + unbound + ' 行未匹配</span>' : '') +
         '</div></div>';
     } else if (p.status === 'in_progress') {
       out += '<div class="card"><div class="bar">' +
-        '<button class="btn green" id="pd-complete"' + (d.shortage_total > 0 ? ' disabled' : '') + '>已完成（需缺件补齐）</button>' +
-        (d.shortage_total > 0 ? '<span class="muted small">尚有 ' + U.fmtNum(d.shortage_total) + ' 件缺件，补齐后才能完成</span>' : '') +
-        '<span class="muted small">｜ 关闭=退回元件并删除项目</span></div></div>';
+        '<button class="btn green" id="pd-complete"' + (d.shortage_total > 0 ? ' disabled' : '') + '>标记完成</button>' +
+        (d.shortage_total > 0 ? '<span class="muted small">尚有 ' + U.fmtNum(d.shortage_total) + ' 件缺件</span>' : '') +
+        '<span class="spacer"></span><button class="btn sm danger" id="pd-close">关闭并删除</button></div></div>';
     } else if (isDone) {
       out += '<div class="card"><div class="bar"><span class="tag green">已完成</span> ' +
-        '<span class="muted small">可填写收益、或点击 ↻ 返单 制作下一批</span></div></div>';
+        '<span class="muted small">可填写收益，或返单继续制作下一批</span></div></div>';
     }
 
     container.innerHTML = out;
 
     container.querySelector('#pd-back').addEventListener('click', () => { this.currentId = null; this.loadList(container); });
     if (container.querySelector('#pd-edit')) container.querySelector('#pd-edit').addEventListener('click', () => this.editProject(p));
-    if (container.querySelector('#pd-bomgo')) container.querySelector('#pd-bomgo').addEventListener('click', () => this.uploadBom(pid, container));
+
+    // BOM 文件选择 → 出现解析按钮
+    const bomDz = container.querySelector('#pd-dz');
+    if (bomDz) {
+      const bomInput = container.querySelector('#pd-bom');
+      const bomRow = container.querySelector('#pd-bomgo-row');
+      const bomName = container.querySelector('#pd-bom-file');
+      let selFile = null;
+      function setBomFile(f) {
+        selFile = f || null;
+        bomRow.style.display = selFile ? 'flex' : 'none';
+        bomName.textContent = selFile ? selFile.name : '';
+      }
+      bomDz.addEventListener('click', () => bomInput.click());
+      bomInput.addEventListener('change', () => setBomFile(bomInput.files[0] || null));
+      ['dragover', 'dragenter'].forEach(ev => bomDz.addEventListener(ev, e => { e.preventDefault(); bomDz.classList.add('drag'); }));
+      ['dragleave', 'drop'].forEach(ev => bomDz.addEventListener(ev, e => { e.preventDefault(); bomDz.classList.remove('drag'); }));
+      bomDz.addEventListener('drop', e => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) setBomFile(f);
+      });
+      container.querySelector('#pd-bomgo').addEventListener('click', () => this.uploadBom(pid, container, selFile));
+    }
     if (container.querySelector('#pd-confirm')) container.querySelector('#pd-confirm').addEventListener('click', () => this.confirmProject(pid, container));
     if (container.querySelector('#pd-complete')) container.querySelector('#pd-complete').addEventListener('click', () => this.completeProject(pid, container));
     if (container.querySelector('#pd-close')) container.querySelector('#pd-close').addEventListener('click', () => this.closeProject(pid, container));
@@ -373,8 +399,7 @@ window.Views.projects = {
     });
   },
 
-  async uploadBom(pid, main) {
-    const file = main.querySelector('#pd-bom').files[0];
+  async uploadBom(pid, main, file) {
     if (!file) { U.toast('请先选择 BOM 文件', 'warn'); return; }
     const fd = new FormData();
     fd.append('file', file);
@@ -474,7 +499,7 @@ window.Views.projects = {
       '<label class="f">缺件 <b style="color:var(--danger)">' + U.fmtNum(it.shortage) + '</b> 件 · 已购 ' + U.fmtNum(it.bought) + ' 件</label>' +
       '<label class="f">购买数量<input type="number" id="by-q" min="1" value="' + it.shortage + '"></label>' +
       '<label class="f">单价(元/个)<input type="number" id="by-p" min="0" step="0.001" value="' + (it.bought_cost && it.bought ? (it.bought_cost / it.bought).toFixed(4) : '') + '"></label>' +
-      '<div class="hint">采购后自动入库并补齐缺件：缺 6 买 10 → 6 件补本项目、4 件入库存。</div>';
+      '<div class="hint">超出缺件的数量自动转入库存。</div>';
     U.modal('采购入库', body, {
       onok: (box) => {
         const qty = Math.floor(Number(box.querySelector('#by-q').value || 0));

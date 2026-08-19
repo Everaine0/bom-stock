@@ -30,9 +30,9 @@ window.Views.components = {
       '<span style="flex:1"></span>' +
       '<button class="btn primary" id="comp-add">+ 新增元件</button>' +
       '</div>' +
-      '<table><thead><tr>' +
-      '<th>名称</th><th>封装</th><th>类别</th><th class="num">单价</th><th class="num">库存</th><th>别名</th><th style="width:280px">操作</th>' +
-      '</tr></thead><tbody id="comp-tbody">' + this.renderRows() + '</tbody></table></div>';
+      '<div class="table-wrap"><table><thead><tr>' +
+      '<th>名称</th><th>封装</th><th>类别</th><th class="num">单价</th><th class="num">库存</th><th>别名</th><th style="width:290px">操作</th>' +
+      '</tr></thead><tbody id="comp-tbody">' + this.renderRows() + '</tbody></table></div></div>';
     container.innerHTML = out;
 
     const tbody = container.querySelector('#comp-tbody');
@@ -110,8 +110,8 @@ window.Views.components = {
   openForm(comp) {
     const aliases = comp ? (() => { try { return JSON.parse(comp.aliases || '[]'); } catch (e) { return []; } })() : [];
     const body = '' +
-      '<label class="f">名称<small class="muted">（匹配时不区分大小写）</small><input type="text" id="f-name" value="' + U.esc(comp ? comp.name : '') + '"></label>' +
-      '<label class="f">封装 Footprint<input type="text" id="f-foot" value="' + U.esc(comp ? comp.footprint : '') + '"></label>' +
+      '<label class="f">名称<input type="text" id="f-name" value="' + U.esc(comp ? comp.name : '') + '"></label>' +
+      '<label class="f">封装<input type="text" id="f-foot" placeholder="如 0805" value="' + U.esc(comp ? comp.footprint : '') + '"></label>' +
       '<div class="row2">' +
       '<label class="f">类别<select id="f-cat">' + ['电阻', '电容', '电感', 'IC', '晶振', '连接器', 'LED', '保险丝', '其他'].map(c => '<option' + (comp && comp.category === c ? ' selected' : '') + '>' + c + '</option>').join('') + '</select></label>' +
       '<label class="f">单价(元/个)<input type="number" step="0.001" min="0" id="f-price" value="' + (comp ? comp.unit_price : '') + '"></label>' +
