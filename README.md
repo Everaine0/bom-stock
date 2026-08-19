@@ -50,3 +50,7 @@ app/            FastAPI 后端（db / matching / bom 解析 / main 路由）
 static/         前端（原生 HTML/CSS/JS，中文，无构建）
 data/           运行时生成的 SQLite 数据库（可整体备份）
 ```
+
+## 开源协议
+
+[MIT](./LICENSE) © 2026 Everaine
