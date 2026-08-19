@@ -193,7 +193,7 @@ window.Views.projects = {
       }
       let actCell;
       if (isDraft) {
-        actCell = '<span class="muted small">确认后占用</span>';
+        actCell = '<button class="btn sm danger pd-del" data-itid="' + it.id + '">删行</button>';
       } else if (p.status === 'in_progress' || p.status === 'completed') {
         actCell = it.shortage > 0
           ? '<button class="btn sm pd-buy" data-itid="' + it.id + '">采购 ' + U.fmtNum(it.shortage) + '</button>'
@@ -276,6 +276,18 @@ window.Views.projects = {
       btn.addEventListener('click', () => {
         const it = d.items.find(x => x.id === Number(btn.dataset.itid));
         if (it) this.buyItem(pid, it, container);
+      });
+    });
+    main.querySelectorAll('.pd-del').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const it = d.items.find(x => x.id === Number(btn.dataset.itid));
+        if (!it) return;
+        if (!await U.confirmDlg('删除该 BOM 行「' + it.name + '」？')) return;
+        try {
+          await Api.del('/projects/' + pid + '/items/' + it.id);
+          U.toast('已删除');
+          await this.loadDetail(container, pid);
+        } catch (e) { U.toast(e.message, 'err'); }
       });
     });
   },
@@ -407,7 +419,8 @@ window.Views.projects = {
       '<label class="f">缺件 <b style="color:var(--danger)">' + U.fmtNum(it.shortage) + '</b> 件 · 已购 ' + U.fmtNum(it.bought) + ' 件</label>' +
       '<label class="f">购买数量<input type="number" id="by-q" min="1" value="' + it.shortage + '"></label>' +
       '<label class="f">单价(元/个)<input type="number" id="by-p" min="0" step="0.001" value="' + (it.bought_cost && it.bought ? (it.bought_cost / it.bought).toFixed(4) : '') + '"></label>' +
-      '<div class="hint">购买后自动入库，并冲减该条缺件与项目成本</div>';
+      '<div class="hint">采购后自动入库并<b>补齐缺件</b>：购买的元件优先补本项目缺件（补入部分计入占用/消耗），超出缺件的部分转入库存。</div>' +
+      '<div class="hint" style="color:var(--warn)">例如：缺 6 件、买 10 件 → 其中 6 件自动补齐本项目，剩余 4 件作为库存。</div>';
     U.modal('采购入库', body, {
       onok: (box) => {
         const qty = Math.floor(Number(box.querySelector('#by-q').value || 0));

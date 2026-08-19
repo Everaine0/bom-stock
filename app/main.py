@@ -223,11 +223,14 @@ def api_component_delete(cid: int):
     with db.conn_ctx() as conn:
         if not conn.execute("SELECT id FROM components WHERE id=?", (cid,)).fetchone():
             raise HTTPException(404, "元件不存在")
-        if conn.execute("SELECT id FROM project_items WHERE component_id=?", (cid,)).fetchone():
-            raise HTTPException(409, "该元件已被项目引用，无法删除（请先解除项目中的绑定）")
-        conn.execute("DELETE FROM stock_logs WHERE component_id=?", (cid,))
+        refs = conn.execute(
+            "SELECT COUNT(*) n FROM project_items WHERE component_id=?", (cid,)
+        ).fetchone()["n"]
+        # 删除元件并自动解除它在所有项目里的绑定（项目内仍保留名称/封装快照；
+        # 历史出入库流水保留，元件名显示为“已删除”）
+        conn.execute("UPDATE project_items SET component_id=NULL WHERE component_id=?", (cid,))
         conn.execute("DELETE FROM components WHERE id=?", (cid,))
-        return {"ok": True}
+        return {"ok": True, "unbound": refs}
 
 
 @app.post("/api/components/{cid}/adjust")
@@ -399,6 +402,20 @@ def api_item_newcomponent(pid: int, iid: int):
         return {"component_id": cid}
 
 
+@app.delete("/api/projects/{pid}/items/{iid}")
+def api_item_delete(pid: int, iid: int):
+    with db.conn_ctx() as conn:
+        p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "项目不存在")
+        if p["status"] != "draft":
+            raise HTTPException(400, "只有草稿项目可以删除 BOM 行")
+        if not conn.execute("SELECT id FROM project_items WHERE id=? AND project_id=?", (iid, pid)).fetchone():
+            raise HTTPException(404, "BOM 条目不存在")
+        conn.execute("DELETE FROM project_items WHERE id=?", (iid,))
+        return {"ok": True}
+
+
 @app.post("/api/projects/{pid}/confirm")
 def api_project_confirm(pid: int):
     with db.conn_ctx() as conn:
@@ -454,11 +471,21 @@ def api_project_purchase(pid: int, data: PurchaseIn):
                 raise HTTPException(400, "购买数量需要为正数")
             if row["component_id"] is None:
                 raise HTTPException(400, "该条目未绑定元件，无法采购")
-            c = conn.execute("SELECT * FROM components WHERE id=?", (row["component_id"],)).fetchone()
-            conn.execute(
-                "UPDATE components SET qty=? WHERE id=?",
-                (c["qty"] + it.qty, row["component_id"]),
-            )
+            cid = row["component_id"]
+            # 自动补齐缺件：先给库存 +买数量，其中 min(买数,缺件) 部分转为本项目占用
+            shortage = max(0, row["total_needed"] - row["occupied"])
+            cover = min(it.qty, shortage)
+            net = it.qty - cover
+            conn.execute("UPDATE components SET qty = qty + ? WHERE id=?", (net, cid))
+            if cover > 0:
+                conn.execute(
+                    "UPDATE project_items SET occupied=occupied+? WHERE id=?", (cover, row["id"])
+                )
+                conn.execute(
+                    "INSERT INTO stock_logs(component_id,delta,type,project_id,note,created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (cid, -cover, "occupy", pid, "采购自动补齐缺件", db.now()),
+                )
             conn.execute(
                 "UPDATE project_items SET bought=bought+?, bought_cost=bought_cost+? WHERE id=?",
                 (it.qty, it.qty * it.unit_price, row["id"]),
@@ -466,7 +493,7 @@ def api_project_purchase(pid: int, data: PurchaseIn):
             conn.execute(
                 "INSERT INTO stock_logs(component_id,delta,type,project_id,note,created_at) "
                 "VALUES(?,?,?,?,?,?)",
-                (row["component_id"], it.qty, "purchase", pid, "项目采购", db.now()),
+                (cid, it.qty, "purchase", pid, "项目采购", db.now()),
             )
         return project_detail(conn, pid)
 
@@ -496,7 +523,8 @@ def api_project_close(pid: int):
             cid = it["component_id"]
             if not cid:
                 continue
-            ret = it["occupied"] + it["bought"]
+            # 退回应为当前占用数量（含确认时占用与采购自动补齐部分）
+            ret = it["occupied"]
             if ret > 0:
                 c = conn.execute("SELECT * FROM components WHERE id=?", (cid,)).fetchone()
                 if c:
@@ -527,6 +555,26 @@ def api_project_revenue(pid: int, data: RevenueIn):
             raise HTTPException(400, "当前状态不可填写收益")
         conn.execute("UPDATE projects SET revenue=? WHERE id=?", (data.revenue, pid))
         return project_detail(conn, pid)
+
+
+@app.get("/api/stock/logs")
+def api_stock_logs(component_id: int = 0, limit: int = 300):
+    with db.conn_ctx() as conn:
+        sql = (
+            "SELECT l.id, l.component_id, l.delta, l.type, l.project_id, l.note, l.created_at, "
+            "c.name AS cname, c.footprint AS cfoot, p.name AS pname "
+            "FROM stock_logs l "
+            "LEFT JOIN components c ON c.id=l.component_id "
+            "LEFT JOIN projects p ON p.id=l.project_id "
+        )
+        params = []
+        if component_id:
+            sql += "WHERE l.component_id=? "
+            params.append(component_id)
+        sql += "ORDER BY l.id DESC LIMIT ?"
+        params.append(min(int(limit), 1000))
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------- settings

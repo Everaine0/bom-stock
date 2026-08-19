@@ -1,57 +1,78 @@
 'use strict';
-/* 元件库页 */
+/* 元件库页：搜索 + 类别筛选 + 缺货筛选 + 入库/出库/流水/编辑/删除 */
 window.Views = window.Views || {};
 
 window.Views.components = {
   data: [],
+  q: '',
+  cat: '',
+  missing: false,
 
   async render(container) {
     let list;
     try { list = await Api.get('/components'); }
     catch (e) { container.innerHTML = '<div class="danger-box">加载失败：' + U.esc(e.message) + '</div>'; return; }
     this.data = list;
+    const cats = [];
+    list.forEach(c => { if (cats.indexOf(c.category) < 0) cats.push(c.category); });
 
     let out = '<div class="card"><h2>元件库 <span class="sub">共 ' + list.length + ' 种</span></h2>' +
-      '<div class="bar"><input type="text" id="comp-search" placeholder="搜索名称 / 封装 / 别名…(不区分大小写)" class="search"><button class="btn primary" id="comp-add">+ 新增元件</button></div>' +
+      '<div class="bar" style="margin-bottom:12px">' +
+      '<input type="text" id="comp-search" placeholder="搜索名称 / 封装 / 别名…" value="' + U.esc(this.q) + '" style="max-width:260px">' +
+      '<select id="comp-cat" style="max-width:140px">' +
+      '<option value="">全部类别</option>' +
+      cats.map(c => '<option value="' + U.esc(c) + '"' + (this.cat === c ? ' selected' : '') + '>' + U.esc(c) + '</option>').join('') +
+      '</select>' +
+      '<label style="display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:13px"><input type="checkbox" id="comp-missing"' + (this.missing ? ' checked' : '') + '> 只看缺货(≤0)</label>' +
+      '<span style="flex:1"></span>' +
+      '<button class="btn primary" id="comp-add">+ 新增元件</button>' +
+      '</div>' +
       '<table><thead><tr>' +
-      '<th>名称</th><th>封装</th><th>类别</th><th>单价</th><th>库存</th><th>别名</th><th style="width:220px">操作</th>' +
-      '</tr></thead><tbody id="comp-tbody">' + this.renderRows(list, '') + '</tbody></table></div>';
+      '<th>名称</th><th>封装</th><th>类别</th><th class="num">单价</th><th class="num">库存</th><th>别名</th><th style="width:280px">操作</th>' +
+      '</tr></thead><tbody id="comp-tbody">' + this.renderRows() + '</tbody></table></div>';
     container.innerHTML = out;
 
-    const search = container.querySelector('#comp-search');
     const tbody = container.querySelector('#comp-tbody');
-    search.addEventListener('input', () => {
-      const q = search.value.trim().toLowerCase();
-      tbody.innerHTML = this.renderRows(list, q);
+    const search = container.querySelector('#comp-search');
+    const cat = container.querySelector('#comp-cat');
+    const missing = container.querySelector('#comp-missing');
+    const apply = () => {
+      this.q = search.value.trim().toLowerCase();
+      this.cat = cat.value;
+      this.missing = missing.checked;
+      tbody.innerHTML = this.renderRows();
       this.bindRowActions(container, tbody);
-    });
+    };
+    search.addEventListener('input', apply);
+    cat.addEventListener('change', apply);
+    missing.addEventListener('change', apply);
     container.querySelector('#comp-add').addEventListener('click', () => this.openForm(null));
     this.bindRowActions(container, tbody);
   },
 
-  renderRows(list, q) {
-    let rows = list;
-    if (q) {
-      rows = list.filter(c => {
-        const hay = (c.name + ' ' + c.footprint + ' ' + c.aliases).toLowerCase();
-        return hay.indexOf(q) >= 0;
-      });
+  renderRows() {
+    let rows = this.data;
+    if (this.q) {
+      rows = rows.filter(c => (c.name + ' ' + c.footprint + ' ' + c.aliases).toLowerCase().indexOf(this.q) >= 0);
     }
+    if (this.cat) rows = rows.filter(c => c.category === this.cat);
+    if (this.missing) rows = rows.filter(c => c.qty <= 0);
     if (!rows.length) return '<tr><td colspan="7" class="empty">无匹配元件</td></tr>';
     return rows.map(c => {
       const aliases = (() => { try { return JSON.parse(c.aliases || '[]'); } catch (e) { return []; } })();
       const aliasHtml = aliases.map(a => '<span class="pill">' + U.esc(a) + '</span>').join('') || '<span class="muted small">—</span>';
-      const lowq = c.qty <= 0 ? ' red' : '';
+      const lowq = c.qty <= 0 ? ' style="color:var(--danger)"' : '';
       return '<tr data-id="' + c.id + '">' +
         '<td><b>' + U.esc(c.name) + '</b></td>' +
         '<td>' + U.esc(c.footprint || '—') + '</td>' +
         '<td><span class="tag">' + U.esc(c.category) + '</span></td>' +
         '<td class="num">' + (c.unit_price ? U.fmtMoney(c.unit_price) : '—') + '</td>' +
-        '<td class="num"><b class="' + lowq + '">' + U.fmtNum(c.qty) + '</b></td>' +
+        '<td class="num"><b' + lowq + '>' + U.fmtNum(c.qty) + '</b></td>' +
         '<td>' + aliasHtml + '</td>' +
         '<td><div class="bar">' +
         '<button class="btn sm c-in">入库</button>' +
         '<button class="btn sm c-out">出库</button>' +
+        '<button class="btn sm c-logs">流水</button>' +
         '<button class="btn sm c-edit">编辑</button>' +
         '<button class="btn sm danger c-del">删</button>' +
         '</div></td></tr>';
@@ -66,12 +87,16 @@ window.Views.components = {
       if (!comp) return;
       tr.querySelector('.c-in').addEventListener('click', () => self.openAdjust(comp, +1));
       tr.querySelector('.c-out').addEventListener('click', () => self.openAdjust(comp, -1));
+      tr.querySelector('.c-logs').addEventListener('click', () => {
+        window.Views.logs.preset = id;
+        App.go('logs');
+      });
       tr.querySelector('.c-edit').addEventListener('click', () => self.openForm(comp));
       tr.querySelector('.c-del').addEventListener('click', async () => {
-        if (!await U.confirmDlg('确定删除元件「' + comp.name + '」？此操作会连同其出入库流水一起删除。')) return;
+        if (!await U.confirmDlg('确定删除元件「' + comp.name + '」？\n若被项目引用，将自动解除这些项目里的绑定。')) return;
         try {
-          await Api.del('/components/' + id);
-          U.toast('已删除');
+          const r = await Api.del('/components/' + id);
+          U.toast((r.unbound ? '已删除并解除 ' + r.unbound + ' 处绑定' : '已删除'));
           await self.render(container);
         } catch (e) { U.toast(e.message, 'err'); }
       });
