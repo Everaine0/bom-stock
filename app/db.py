@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS projects(
   revenue           REAL,
   note              TEXT NOT NULL DEFAULT '',
   closed_at         TEXT,
+  completed_at      TEXT,
   parent_project_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS project_items(
@@ -108,6 +109,8 @@ def init_db():
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()]
         if "parent_project_id" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN parent_project_id INTEGER")
+        if "completed_at" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN completed_at TEXT")
     with conn_ctx() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value) VALUES('default_loss_ratio','5')"
@@ -172,13 +175,13 @@ def restore_all(data: dict):
         for p in data.get("projects", []):
             conn.execute(
                 "INSERT INTO projects(id,name,status,created_at,board_count,loss_ratio,"
-                "needs_pcb,pcb_cost,needs_stencil,stencil_cost,other_cost,revenue,note,closed_at,parent_project_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "needs_pcb,pcb_cost,needs_stencil,stencil_cost,other_cost,revenue,note,closed_at,completed_at,parent_project_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (p["id"], p["name"], p.get("status", "draft"), p.get("created_at", now()),
                  p.get("board_count", 1), p.get("loss_ratio"), p.get("needs_pcb", 0),
                  p.get("pcb_cost", 0), p.get("needs_stencil", 0), p.get("stencil_cost", 0),
                  p.get("other_cost", 0), p.get("revenue"), p.get("note", ""), p.get("closed_at"),
-                 p.get("parent_project_id")),
+                 p.get("completed_at"), p.get("parent_project_id")),
             )
         for it in data.get("project_items", []):
             conn.execute(

@@ -75,6 +75,7 @@ class PurchaseExtraIn(BaseModel):
 
 class SettingsIn(BaseModel):
     default_loss_ratio: float = 5
+    low_stock_threshold: float = 0
 
 
 # ---------------------------------------------------------------- helpers
@@ -578,7 +579,7 @@ def api_project_complete(pid: int):
                 bad += 1
         if bad:
             raise HTTPException(400, f"仍有 {bad} 种元件缺件未补齐，不能标记为已完成")
-        conn.execute("UPDATE projects SET status='completed' WHERE id=?", (pid,))
+        conn.execute("UPDATE projects SET status='completed', completed_at=? WHERE id=?", (db.now(), pid))
         return project_detail(conn, pid)
 
 
@@ -762,17 +763,21 @@ def api_purchases_shortages():
 # ---------------------------------------------------------------- settings
 @app.get("/api/settings")
 def api_settings():
-    try:
-        return {"default_loss_ratio": float(db.get_setting("default_loss_ratio", "5"))}
-    except Exception:
-        return {"default_loss_ratio": 5.0}
+    def _f(key, default):
+        try:
+            return float(db.get_setting(key, str(default)))
+        except Exception:
+            return default
+    return {"default_loss_ratio": _f("default_loss_ratio", 5),
+            "low_stock_threshold": _f("low_stock_threshold", 0)}
 
 
 @app.put("/api/settings")
 def api_settings_update(data: SettingsIn):
-    if data.default_loss_ratio < 0:
-        raise HTTPException(400, "损耗比不能为负数")
+    if data.default_loss_ratio < 0 or data.low_stock_threshold < 0:
+        raise HTTPException(400, "数值不能为负数")
     db.set_setting("default_loss_ratio", data.default_loss_ratio)
+    db.set_setting("low_stock_threshold", data.low_stock_threshold)
     return {"ok": True}
 
 
@@ -824,6 +829,49 @@ def api_stats_overview():
         cost_active += sum(it["bought_cost"] for it in items if it["st"] in ("in_progress", "completed"))
         cost_completed += sum(it["bought_cost"] for it in items if it["st"] == "completed")
 
+        # 低库存数量（按设置阈值）
+        try:
+            ls_th = float(db.get_setting("low_stock_threshold", "0"))
+        except Exception:
+            ls_th = 0.0
+        low_stock_count = conn.execute(
+            "SELECT COUNT(*) n FROM components WHERE qty<=?", (ls_th,)
+        ).fetchone()["n"]
+
+        # 消耗量 TOP（已完成项目）
+        top_consumed = [dict(r) for r in conn.execute(
+            "SELECT it.name, it.footprint, SUM(it.total_needed) AS qty "
+            "FROM project_items it JOIN projects p ON p.id=it.project_id "
+            "WHERE p.status='completed' AND it.total_needed>0 "
+            "GROUP BY it.name, it.footprint ORDER BY qty DESC LIMIT 10"
+        ).fetchall()]
+
+        # 采购金额 TOP（进行中/已完成）
+        top_bought_cost = [dict(r) for r in conn.execute(
+            "SELECT it.name, it.footprint, SUM(it.bought_cost) AS cost "
+            "FROM project_items it JOIN projects p ON p.id=it.project_id "
+            "WHERE p.status IN ('in_progress','completed') AND it.bought_cost>0 "
+            "GROUP BY it.name, it.footprint ORDER BY cost DESC LIMIT 10"
+        ).fetchall()]
+
+        # 月度成本/收益/毛利趋势（按完成时间）
+        trend_map = {}
+        for p in proj:
+            if p["status"] != "completed" or not p["completed_at"]:
+                continue
+            ym = p["completed_at"][:7]
+            c = cost_total_for(conn, p["id"], p["other_cost"])
+            rv = p["revenue"] or 0
+            t = trend_map.setdefault(ym, {"cost": 0.0, "revenue": 0.0})
+            t["cost"] += c
+            t["revenue"] += rv
+        trend = [{
+            "month": k,
+            "cost": round(v["cost"], 2),
+            "revenue": round(v["revenue"], 2),
+            "profit": round(v["revenue"] - v["cost"], 2),
+        } for k, v in sorted(trend_map.items())]
+
         return {
             "inventory_qty": inv["q"],
             "inventory_count": inv["n"],
@@ -837,6 +885,11 @@ def api_stats_overview():
             "profit": round(revenue - cost_completed, 2),
             "pending_pcb": pending_pcb,
             "pending_stencil": pending_stencil,
+            "low_stock_count": low_stock_count,
+            "low_stock_threshold": ls_th,
+            "top_consumed": top_consumed,
+            "top_bought_cost": top_bought_cost,
+            "trend": trend,
             "project_counts": status_counts,
         }
 

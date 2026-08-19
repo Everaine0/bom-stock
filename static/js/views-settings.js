@@ -11,13 +11,16 @@ window.Views.settings = {
       '<div class="card" style="max-width:560px"><h2>设置</h2>' +
       '<label class="f">全局损耗比 %<small class="muted">（新建项目默认使用；每个项目可单独覆盖）</small>' +
       '<input type="number" id="s-loss" min="0" step="0.1" value="' + s.default_loss_ratio + '"></label>' +
+      '<label class="f">低库存预警阈值（件）<small class="muted">（元件库存 ≤ 此值时在元件库标红/筛选，默认 0）</small>' +
+      '<input type="number" id="s-low" min="0" step="1" value="' + s.low_stock_threshold + '"></label>' +
       '<div class="bar"><button class="btn primary" id="s-save">保存</button></div>' +
-      '<div class="hint">说明：需求量 = BOM数量 × 板数 × (1 + 损耗%)，向上取整；缺件与扣库存均按此计算。</div>' +
+      '<div class="hint">说明：需求量 = BOM数量 × 板数 × (1 + 损耗%)，向上取整；缺件与扣库存均按此计算。采购页负责"待采购"，元件库的"低库存"只反映库存健康度。</div>' +
       '</div>';
     container.querySelector('#s-save').addEventListener('click', async () => {
       const v = Number(document.getElementById('s-loss').value || 0);
+      const low = Number(document.getElementById('s-low').value || 0);
       try {
-        await Api.put('/settings', { default_loss_ratio: v });
+        await Api.put('/settings', { default_loss_ratio: v, low_stock_threshold: low });
         U.toast('已保存');
       } catch (e) { U.toast(e.message, 'err'); }
     });

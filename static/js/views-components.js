@@ -9,21 +9,24 @@ window.Views.components = {
   missing: false,
 
   async render(container) {
-    let list;
-    try { list = await Api.get('/components'); }
-    catch (e) { container.innerHTML = '<div class="danger-box">加载失败：' + U.esc(e.message) + '</div>'; return; }
+    let list, settings;
+    try {
+      [list, settings] = await Promise.all([Api.get('/components'), Api.get('/settings')]);
+      this.threshold = Number(settings.low_stock_threshold || 0);
+      this.thresholdLabel = '≤' + this.threshold + ' 件';
+    } catch (e) { container.innerHTML = '<div class="danger-box">加载失败：' + U.esc(e.message) + '</div>'; return; }
     this.data = list;
     const cats = [];
     list.forEach(c => { if (cats.indexOf(c.category) < 0) cats.push(c.category); });
 
-    let out = '<div class="card"><h2>元件库 <span class="sub">共 ' + list.length + ' 种</span></h2>' +
+    let out = '<div class="card"><h2>元件库 <span class="sub">共 ' + list.length + ' 种 · 低库存阈值 ' + this.thresholdLabel + '</span></h2>' +
       '<div class="bar" style="margin-bottom:12px">' +
       '<input type="text" id="comp-search" placeholder="搜索名称 / 封装 / 别名…" value="' + U.esc(this.q) + '" style="max-width:260px">' +
       '<select id="comp-cat" style="max-width:140px">' +
       '<option value="">全部类别</option>' +
       cats.map(c => '<option value="' + U.esc(c) + '"' + (this.cat === c ? ' selected' : '') + '>' + U.esc(c) + '</option>').join('') +
       '</select>' +
-      '<label style="display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:13px"><input type="checkbox" id="comp-missing"' + (this.missing ? ' checked' : '') + '> 只看缺货(≤0)</label>' +
+      '<label style="display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:13px"><input type="checkbox" id="comp-missing"' + (this.missing ? ' checked' : '') + '> 只看低库存(' + this.thresholdLabel + ')</label>' +
       '<span style="flex:1"></span>' +
       '<button class="btn primary" id="comp-add">+ 新增元件</button>' +
       '</div>' +
@@ -56,14 +59,15 @@ window.Views.components = {
       rows = rows.filter(c => (c.name + ' ' + c.footprint + ' ' + c.aliases).toLowerCase().indexOf(this.q) >= 0);
     }
     if (this.cat) rows = rows.filter(c => c.category === this.cat);
-    if (this.missing) rows = rows.filter(c => c.qty <= 0);
+    if (this.missing) rows = rows.filter(c => c.qty <= (this.threshold || 0));
     if (!rows.length) return '<tr><td colspan="7" class="empty">无匹配元件</td></tr>';
     return rows.map(c => {
       const aliases = (() => { try { return JSON.parse(c.aliases || '[]'); } catch (e) { return []; } })();
       const aliasHtml = aliases.map(a => '<span class="pill">' + U.esc(a) + '</span>').join('') || '<span class="muted small">—</span>';
-      const lowq = c.qty <= 0 ? ' style="color:var(--danger)"' : '';
+      const low = c.qty <= (this.threshold || 0);
+      const lowq = low ? ' style="color:var(--danger)"' : '';
       return '<tr data-id="' + c.id + '">' +
-        '<td><b>' + U.esc(c.name) + '</b></td>' +
+        '<td><b>' + U.esc(c.name) + '</b>' + (low ? ' <span class="tag red">低库存</span>' : '') + '</td>' +
         '<td>' + U.esc(c.footprint || '—') + '</td>' +
         '<td><span class="tag">' + U.esc(c.category) + '</span></td>' +
         '<td class="num">' + (c.unit_price ? U.fmtMoney(c.unit_price) : '—') + '</td>' +
