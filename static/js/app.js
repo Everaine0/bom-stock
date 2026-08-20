@@ -13,6 +13,7 @@
     root.setAttribute('data-theme', next);
     try { localStorage.setItem('bom-theme', next); } catch (e) {}
     applyThemeUI();
+    try { window.dispatchEvent(new Event('bom-theme-changed')); } catch (e) {}
   }
   document.querySelectorAll('.theme-toggle').forEach(function (b) {
     b.addEventListener('click', toggleTheme);

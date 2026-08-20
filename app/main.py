@@ -4,9 +4,9 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -29,6 +29,8 @@ class ComponentIn(BaseModel):
     aliases: List[str] = []
     unit_price: float = 0
     note: str = ""
+    location: str = ""
+    threshold: Optional[float] = None  # 每元件独立预警阈值；None = 用全局阈值
 
 
 class AdjustIn(BaseModel):
@@ -76,6 +78,10 @@ class PurchaseExtraIn(BaseModel):
 class SettingsIn(BaseModel):
     default_loss_ratio: float = 5
     low_stock_threshold: float = 0
+    location_prefix: Dict[str, str] = {}       # 类别 -> 位置前缀（如 电阻 -> R）
+    slots_per_box: int = 8                     # 每个盒子槽位数量
+    slot_digits: int = 2                       # 槽位编号位数（如 2 -> 01）
+    footprint_presets: Dict[str, List[str]] = {}  # 类别 -> 封装预设列表
 
 
 # ---------------------------------------------------------------- helpers
@@ -257,9 +263,10 @@ def api_component_create(data: ComponentIn):
             raise HTTPException(409, "已存在相同名称+封装的元件（注意不区分大小写）")
         aliases = json.dumps([a.strip() for a in data.aliases if a.strip()], ensure_ascii=False)
         cur = conn.execute(
-            "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note) "
-            "VALUES(?,?,?,?,0,?,?)",
-            (name, data.footprint.strip(), data.category, aliases, data.unit_price, data.note),
+            "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note,location,threshold) "
+            "VALUES(?,?,?,?,0,?,?,?,?)",
+            (name, data.footprint.strip(), data.category, aliases, data.unit_price, data.note,
+             data.location.strip(), data.threshold),
         )
         return {"id": cur.lastrowid}
 
@@ -277,8 +284,10 @@ def api_component_update(cid: int, data: ComponentIn):
             raise HTTPException(409, "存在相同名称+封装的其它元件")
         aliases = json.dumps([a.strip() for a in data.aliases if a.strip()], ensure_ascii=False)
         conn.execute(
-            "UPDATE components SET name=?, footprint=?, category=?, aliases=?, unit_price=?, note=? WHERE id=?",
-            (name, data.footprint.strip(), data.category, aliases, data.unit_price, data.note, cid),
+            "UPDATE components SET name=?, footprint=?, category=?, aliases=?, unit_price=?, note=?, "
+            "location=?, threshold=? WHERE id=?",
+            (name, data.footprint.strip(), data.category, aliases, data.unit_price, data.note,
+             data.location.strip(), data.threshold, cid),
         )
         return {"ok": True}
 
@@ -459,14 +468,16 @@ def api_item_newcomponent(pid: int, iid: int):
         if dup:
             cid = dup["id"]
         else:
+            aliases = matching.gen_aliases(name, cat)  # 仅电容/电阻生成等价别名
+            loc = next_location(conn, cat)
             cur = conn.execute(
-                "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note) "
-                "VALUES(?,?,?,?,0,0,'从BOM创建')",
-                (name, foot, cat, "[]"),
+                "INSERT INTO components(name,footprint,category,aliases,qty,unit_price,note,location) "
+                "VALUES(?,?,?,?,0,0,'从BOM创建',?)",
+                (name, foot, cat, json.dumps(aliases, ensure_ascii=False), loc),
             )
             cid = cur.lastrowid
         conn.execute("UPDATE project_items SET component_id=? WHERE id=?", (cid, iid))
-        return {"component_id": cid, "category": cat}
+        return {"component_id": cid, "category": cat, "location": loc if not dup else None}
 
 
 @app.delete("/api/projects/{pid}/items/{iid}")
@@ -618,17 +629,21 @@ def api_project_close(pid: int):
 
 class CloneIn(BaseModel):
     board_count: int = 1
+    needs_pcb: Optional[bool] = None
+    needs_stencil: Optional[bool] = None
 
 
 @app.post("/api/projects/{pid}/clone", status_code=201)
 def api_project_clone(pid: int, data: CloneIn):
-    """返单：以已完成项目为母项目，克隆出一个新的独立草稿项目。"""
+    """返单：以已完成项目为母项目，克隆出一个新的独立草稿项目（可勾选是否需要 PCB / 钢网）。"""
     with db.conn_ctx() as conn:
         p = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
         if not p:
             raise HTTPException(404, "项目不存在")
         if p["status"] != "completed":
             raise HTTPException(400, "只有已完成的项目可以返单")
+        needs_pcb = data.needs_pcb if data.needs_pcb is not None else bool(p["needs_pcb"])
+        needs_stencil = data.needs_stencil if data.needs_stencil is not None else bool(p["needs_stencil"])
         root = series_root(conn, pid)
         cnt = conn.execute(
             "SELECT COUNT(*) n FROM projects WHERE parent_project_id=?", (root,)
@@ -639,7 +654,7 @@ def api_project_clone(pid: int, data: CloneIn):
             "pcb_cost,needs_stencil,stencil_cost,other_cost,note,parent_project_id) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (name, "draft", db.now(), max(1, data.board_count), p["loss_ratio"],
-             p["needs_pcb"], 0, p["needs_stencil"], 0, p["other_cost"], p["note"], root),
+             int(needs_pcb), 0, int(needs_stencil), 0, p["other_cost"], p["note"], root),
         )
         npid = cur.lastrowid
         for it in conn.execute("SELECT * FROM project_items WHERE project_id=?", (pid,)).fetchall():
@@ -761,6 +776,94 @@ def api_purchases_shortages():
 
 
 # ---------------------------------------------------------------- settings
+DEFAULT_PREFIX = {"电阻": "R", "电容": "C", "电感": "L", "IC": "U", "晶振": "Y",
+                  "连接器": "J", "LED": "LED", "保险丝": "F", "其他": "X"}
+
+# 默认封装预设（立创 EDA 命名风格，可在设置页修改）
+DEFAULT_PRESETS = {
+    "电阻": ["R0402", "R0603", "R0805", "R1206", "R1210", "R2010", "R2512", "AXIAL-0.4", "AXIAL-0.6"],
+    "电容": ["C0402", "C0603", "C0805", "C1206", "C1210", "C1812", "C2512", "CAP-D5.0xH5.0"],
+    "电感": ["L0402", "L0603", "L0805", "L1008", "L1206", "L1210", "L2512"],
+    "IC": ["SOT-23", "SOT-23-5", "SOT-23-6", "SOT-89", "SOT-223", "SOP-8", "SOP-16",
+           "TSSOP-8", "TSSOP-16", "TSSOP-20", "QFN-16", "QFN-32", "LQFP-48",
+           "DIP-8", "DIP-16", "TO-92", "TO-252", "TO-263", "TO-220"],
+    "晶振": ["X3215", "X3225", "X5032", "HC-49S", "HC-49SMD"],
+    "连接器": ["PH2.0-2P", "PH2.0-3P", "PH2.0-4P", "XH2.54-2P", "XH2.54-3P", "XH2.54-4P",
+              "VH3.96-2P", "USB-A_4P", "USB-C_16P", "RJ45-8P"],
+    "LED": ["LED-0402", "LED-0603", "LED-0805", "LED-1206", "LED-3528", "LED-3mm", "LED-5mm"],
+    "保险丝": ["F0402", "F0603", "F0805", "F1206", "F1210"],
+    "其他": [],
+}
+
+
+def _setting_json(key, default):
+    try:
+        v = db.get_setting(key, "")
+        return json.loads(v) if v else default
+    except Exception:
+        return default
+
+
+def merged_presets():
+    """默认预设为底，用户存储的预设按类别覆盖，并保留用户新增类别。"""
+    stored = _setting_json("footprint_presets", {}) or {}
+    out = dict(DEFAULT_PRESETS)
+    for k, v in stored.items():
+        out[k] = v
+    return out
+
+
+def merged_prefix():
+    stored = _setting_json("location_prefix", {}) or {}
+    out = dict(DEFAULT_PREFIX)
+    for k, v in stored.items():
+        out[k] = v
+    return out
+
+
+def next_location(conn, category):
+    """为该类别分配最小空位置：前缀+盒子-槽位，如 R1-01。"""
+    pmap = merged_prefix()
+    prefix = pmap.get(category) or pmap.get("其他") or "X"
+    try:
+        slots = int(db.get_setting("slots_per_box", "8"))
+    except Exception:
+        slots = 8
+    try:
+        digits = int(db.get_setting("slot_digits", "2"))
+    except Exception:
+        digits = 2
+    slots = max(1, min(999, slots))
+    digits = max(1, min(4, digits))
+    used = {str(r["location"]).lower() for r in conn.execute(
+        "SELECT location FROM components WHERE location<>''").fetchall()}
+    for box in range(1, 10000):
+        for slot in range(1, slots + 1):
+            loc = f"{prefix}{box}-{str(slot).zfill(digits)}"
+            if loc.lower() not in used:
+                return loc
+    return f"{prefix}1-{str(1).zfill(digits)}"
+
+
+def get_stock_thresholds(conn):
+    """每元件生效阈值：元件自己的 threshold，否则用全局 low_stock_threshold。"""
+    try:
+        g = float(db.get_setting("low_stock_threshold", "0"))
+    except Exception:
+        g = 0.0
+    rows = conn.execute("SELECT id, threshold FROM components").fetchall()
+    return g, {r["id"]: (r["threshold"] if r["threshold"] is not None else g) for r in rows}
+
+
+def comp_stock_status(qty: int, th: float) -> str:
+    """'ok' 正常 | 'warn' 预警(低库存) | 'out' 缺货"""
+    if qty <= 0:
+        return "out"
+    if qty <= th:
+        return "warn"
+    return "ok"
+
+
 @app.get("/api/settings")
 def api_settings():
     def _f(key, default):
@@ -768,22 +871,37 @@ def api_settings():
             return float(db.get_setting(key, str(default)))
         except Exception:
             return default
-    return {"default_loss_ratio": _f("default_loss_ratio", 5),
-            "low_stock_threshold": _f("low_stock_threshold", 0)}
+    return {
+        "default_loss_ratio": _f("default_loss_ratio", 5),
+        "low_stock_threshold": _f("low_stock_threshold", 0),
+        "location_prefix": merged_prefix(),
+        "slots_per_box": _setting_json("slots_per_box", 8),
+        "slot_digits": _setting_json("slot_digits", 2),
+        "footprint_presets": merged_presets(),
+    }
 
 
 @app.put("/api/settings")
 def api_settings_update(data: SettingsIn):
     if data.default_loss_ratio < 0 or data.low_stock_threshold < 0:
         raise HTTPException(400, "数值不能为负数")
+    if data.slots_per_box < 1 or data.slots_per_box > 999:
+        raise HTTPException(400, "每个盒子的槽位数量需在 1~999 之间")
+    if data.slot_digits < 1 or data.slot_digits > 4:
+        raise HTTPException(400, "槽位编号位数需在 1~4 之间")
     db.set_setting("default_loss_ratio", data.default_loss_ratio)
     db.set_setting("low_stock_threshold", data.low_stock_threshold)
+    db.set_setting("location_prefix", json.dumps(data.location_prefix, ensure_ascii=False))
+    db.set_setting("slots_per_box", data.slots_per_box)
+    db.set_setting("slot_digits", data.slot_digits)
+    db.set_setting("footprint_presets", json.dumps(data.footprint_presets, ensure_ascii=False))
     return {"ok": True}
 
 
 # ---------------------------------------------------------------- stats
 @app.get("/api/stats/overview")
-def api_stats_overview():
+def api_stats_overview(range_days: int = Query(30, alias="range", ge=7, le=365)):
+    range_days = range_days if range_days in (7, 30, 90, 365) else 30
     with db.conn_ctx() as conn:
         inv = conn.execute(
             "SELECT COALESCE(SUM(qty),0) q, COUNT(*) n, COALESCE(SUM(qty*unit_price),0) v FROM components"
@@ -829,14 +947,46 @@ def api_stats_overview():
         cost_active += sum(it["bought_cost"] for it in items if it["st"] in ("in_progress", "completed"))
         cost_completed += sum(it["bought_cost"] for it in items if it["st"] == "completed")
 
-        # 低库存数量（按设置阈值）
-        try:
-            ls_th = float(db.get_setting("low_stock_threshold", "0"))
-        except Exception:
-            ls_th = 0.0
-        low_stock_count = conn.execute(
-            "SELECT COUNT(*) n FROM components WHERE qty<=?", (ls_th,)
-        ).fetchone()["n"]
+        # 库存状态（三档）：正常绿色 / 预警黄色 / 缺货红色（按每元件生效阈值）
+        g_th, th_map = get_stock_thresholds(conn)
+        states = {"ok": 0, "warn": 0, "out": 0}
+        warning_components = []
+        for c in conn.execute(
+            "SELECT id, name, footprint, category, location, qty, threshold FROM components"
+        ).fetchall():
+            st = comp_stock_status(c["qty"], th_map[c["id"]])
+            states[st] += 1
+            if st in ("warn", "out"):
+                warning_components.append({
+                    "id": c["id"], "name": c["name"], "footprint": c["footprint"],
+                    "category": c["category"], "location": c["location"],
+                    "qty": c["qty"], "threshold": th_map[c["id"]], "status": st,
+                })
+        warning_components.sort(key=lambda x: (x["qty"], x["name"]))
+
+        # 出入库趋势（最近 N 天）：每日入库量与出库量
+        from datetime import date, timedelta
+        start = (date.today() - timedelta(days=range_days - 1)).isoformat()
+        trend_rows = conn.execute(
+            "SELECT date(created_at) AS d, type, SUM(delta) AS s "
+            "FROM stock_logs WHERE date(created_at) >= ? GROUP BY d, type",
+            (start,),
+        ).fetchall()
+        by_day = {}
+        for r in trend_rows:
+            d = r["d"]
+            if d not in by_day:
+                by_day[d] = {"in": 0, "out": 0}
+            delta = r["s"] or 0
+            if delta > 0:
+                by_day[d]["in"] += delta
+            else:
+                by_day[d]["out"] += -delta
+        stock_trend = []
+        for i in range(range_days):
+            d = (date.today() - timedelta(days=range_days - 1 - i)).isoformat()
+            v = by_day.get(d, {"in": 0, "out": 0})
+            stock_trend.append({"date": d[5:], "in": v["in"], "out": v["out"]})
 
         # 消耗量 TOP（已完成项目）
         top_consumed = [dict(r) for r in conn.execute(
@@ -885,8 +1035,11 @@ def api_stats_overview():
             "profit": round(revenue - cost_completed, 2),
             "pending_pcb": pending_pcb,
             "pending_stencil": pending_stencil,
-            "low_stock_count": low_stock_count,
-            "low_stock_threshold": ls_th,
+            "low_stock_threshold": g_th,
+            "stock_state": states,
+            "warning_components": warning_components,
+            "stock_trend": stock_trend,
+            "trend_range": range_days,
             "top_consumed": top_consumed,
             "top_bought_cost": top_bought_cost,
             "trend": trend,

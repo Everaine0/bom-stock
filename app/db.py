@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS components(
   aliases    TEXT NOT NULL DEFAULT '[]',
   qty        INTEGER NOT NULL DEFAULT 0,
   unit_price REAL NOT NULL DEFAULT 0,
-  note       TEXT NOT NULL DEFAULT ''
+  note       TEXT NOT NULL DEFAULT '',
+  location   TEXT NOT NULL DEFAULT '',
+  threshold  REAL
 );
 CREATE TABLE IF NOT EXISTS stock_logs(
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +107,12 @@ def conn_ctx():
 def init_db():
     with conn_ctx() as conn:
         conn.executescript(SCHEMA)
-        # 迁移：老库补 parent_project_id 列
+        # 迁移：老库补新列
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(components)").fetchall()]
+        if "location" not in cols:
+            conn.execute("ALTER TABLE components ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+        if "threshold" not in cols:
+            conn.execute("ALTER TABLE components ADD COLUMN threshold REAL")
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()]
         if "parent_project_id" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN parent_project_id INTEGER")
@@ -160,10 +167,11 @@ def restore_all(data: dict):
             )
         for c in data.get("components", []):
             conn.execute(
-                "INSERT INTO components(id,name,footprint,category,aliases,qty,unit_price,note) "
-                "VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO components(id,name,footprint,category,aliases,qty,unit_price,note,location,threshold) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (c["id"], c["name"], c["footprint"], c["category"], c["aliases"],
-                 c["qty"], c.get("unit_price", 0), c.get("note", "")),
+                 c["qty"], c.get("unit_price", 0), c.get("note", ""),
+                 c.get("location", ""), c.get("threshold")),
             )
         for l in data.get("stock_logs", []):
             conn.execute(

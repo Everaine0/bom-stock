@@ -260,27 +260,29 @@ window.Views.projects = {
       '</tr></thead><tbody>' + itemsHtml + '</tbody></table></div>' +
       '<div class="bar" style="margin-top:10px"><span class="muted small">缺件合计：<b style="color:var(--danger)">' + U.fmtNum(d.shortage_total) + '</b> 件</span></div></div>';
 
-    // PCB / 钢网采购
-    out += '<div class="card"><h2>PCB / 钢网采购</h2>';
-    const kindName = { pcb: 'PCB打板', stencil: '钢网' };
-    if (d.purchases.length) {
-      out += '<table><thead><tr><th>类型</th><th class="num">数量</th><th class="num">成本</th><th>备注</th><th>时间</th></tr></thead><tbody>';
-      for (const x of d.purchases) {
-        out += '<tr><td>' + (kindName[x.kind] || x.kind) + '</td><td class="num">' + U.fmtNum(x.qty) + '</td>' +
-          '<td class="num">' + U.fmtMoney(x.cost) + '</td><td class="small muted">' + U.esc(x.note) + '</td>' +
-          '<td class="small muted">' + U.esc(x.created_at) + '</td></tr>';
+    // PCB / 钢网采购（仅当项目勾选了 PCB/钢网 或有采购记录时才显示）
+    if (p.needs_pcb || p.needs_stencil || d.purchases.length) {
+      out += '<div class="card"><h2>PCB / 钢网采购</h2>';
+      const kindName = { pcb: 'PCB打板', stencil: '钢网' };
+      if (d.purchases.length) {
+        out += '<table><thead><tr><th>类型</th><th class="num">数量</th><th class="num">成本</th><th>备注</th><th>时间</th></tr></thead><tbody>';
+        for (const x of d.purchases) {
+          out += '<tr><td>' + (kindName[x.kind] || x.kind) + '</td><td class="num">' + U.fmtNum(x.qty) + '</td>' +
+            '<td class="num">' + U.fmtMoney(x.cost) + '</td><td class="small muted">' + U.esc(x.note) + '</td>' +
+            '<td class="small muted">' + U.esc(x.created_at) + '</td></tr>';
+        }
+        out += '</tbody></table>';
       }
-      out += '</tbody></table>';
-    }
-    if (d.pending_purchases.length && isAct) {
-      for (const pp of d.pending_purchases) {
-        out += '<div class="bar" style="margin-top:8px"><span class="tag org">待采购 ' + pp.name + ' ×' + U.fmtNum(pp.qty) + '</span>' +
-          '<button class="btn sm px-buy" data-kind="' + pp.kind + '" data-qty="' + pp.qty + '">记录成本</button></div>';
+      if (d.pending_purchases.length && isAct) {
+        for (const pp of d.pending_purchases) {
+          out += '<div class="bar" style="margin-top:8px"><span class="tag org">待采购 ' + pp.name + ' ×' + U.fmtNum(pp.qty) + '</span>' +
+            '<button class="btn sm px-buy" data-kind="' + pp.kind + '" data-qty="' + pp.qty + '">记录成本</button></div>';
+        }
+      } else if (isDraft) {
+        out += '<div class="muted small">确认项目后，在此记录实际采购成本。</div>';
       }
-    } else if (isDraft) {
-      out += '<div class="muted small">确认项目后，在此记录实际采购成本。</div>';
+      out += '</div>';
     }
-    out += '</div>';
 
     // 返单系列
     const s = d.series;
@@ -357,7 +359,7 @@ window.Views.projects = {
     if (container.querySelector('#pd-complete')) container.querySelector('#pd-complete').addEventListener('click', () => this.completeProject(pid, container));
     if (container.querySelector('#pd-close')) container.querySelector('#pd-close').addEventListener('click', () => this.closeProject(pid, container));
     if (container.querySelector('#pd-profit')) container.querySelector('#pd-profit').addEventListener('click', () => this.setRevenue(pid, container, p.revenue));
-    if (container.querySelector('#pd-redo')) container.querySelector('#pd-redo').addEventListener('click', () => this.redoProject(pid, container));
+    if (container.querySelector('#pd-redo')) container.querySelector('#pd-redo').addEventListener('click', () => this.redoProject(pid, p, container));
 
     // PCB/钢网 记录采购
     container.querySelectorAll('.px-buy').forEach(b => {
@@ -458,15 +460,26 @@ window.Views.projects = {
     } catch (e) { U.toast(e.message, 'err'); }
   },
 
-  async redoProject(pid, container) {
-    const v = await U.ask('返单：这一批要做几块板？', '1');
-    if (v == null) return;
-    try {
-      const r = await Api.post('/projects/' + pid + '/clone', { board_count: Number(v) || 1 });
-      U.toast('已创建：' + r.name);
-      this.currentId = r.id;
-      await this.render(container);
-    } catch (e) { U.toast(e.message, 'err'); }
+  async redoProject(pid, p, container) {
+    const body =
+      '<label class="f">返单：这一批要做几块板？<input type="number" id="rd-boards" min="1" value="1"></label>' +
+      '<label class="f"><input type="checkbox" id="rd-pcb" style="width:auto"' + (p.needs_pcb ? ' checked' : '') + '> 需 PCB 打板（采购时再记录成本）</label>' +
+      '<label class="f"><input type="checkbox" id="rd-sten" style="width:auto"' + (p.needs_stencil ? ' checked' : '') + '> 需钢网（采购时再记录成本）</label>';
+    U.modal('返单', body, {
+      onok: (box) => {
+        const boards = Math.floor(Number(box.querySelector('#rd-boards').value || 0));
+        if (boards <= 0) { U.toast('板数需为正数', 'err'); return false; }
+        return Api.post('/projects/' + pid + '/clone', {
+          board_count: boards,
+          needs_pcb: box.querySelector('#rd-pcb').checked,
+          needs_stencil: box.querySelector('#rd-sten').checked
+        }).then(async (r) => {
+          U.toast('已创建：' + r.name);
+          this.currentId = r.id;
+          await this.render(container);
+        }).catch(e => { U.toast(e.message, 'err'); return false; });
+      }
+    });
   },
 
   async recordExtra(pid, kind, qty, container) {

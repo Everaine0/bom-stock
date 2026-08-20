@@ -29,19 +29,20 @@ window.Views.purchases = {
     let html = '<div class="card"><h2>待采购元件</h2>' +
       '<div class="table-wrap"><table><thead><tr><th>项目</th><th>元件 / 封装</th><th class="num">缺件</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 
-    // —— PCB / 钢网 ——
-    rows = '';
-    const kindName = { pcb: 'PCB打板', stencil: '钢网' };
-    if (!pending.length) rows = '<tr><td colspan="4" class="empty">没有待采购的 PCB / 钢网 ✓</td></tr>';
-    for (const p of pending) {
-      rows += '<tr data-pid="' + p.project_id + '" data-kind="' + p.kind + '" data-qty="' + p.qty + '">' +
-        '<td>' + U.esc(p.project_name) + '</td>' +
-        '<td><span class="tag org">' + kindName[p.kind] + '</span></td>' +
-        '<td class="num">×' + U.fmtNum(p.qty) + '</td>' +
-        '<td><button class="btn sm p-px">记录成本</button></td></tr>';
+    // —— PCB / 钢网（仅当有项目勾选了 PCB/钢网且有缺时显示）——
+    if (pending.length) {
+      rows = '';
+      const kindName = { pcb: 'PCB打板', stencil: '钢网' };
+      for (const p of pending) {
+        rows += '<tr data-pid="' + p.project_id + '" data-kind="' + p.kind + '" data-qty="' + p.qty + '">' +
+          '<td>' + U.esc(p.project_name) + '</td>' +
+          '<td><span class="tag org">' + kindName[p.kind] + '</span></td>' +
+          '<td class="num">×' + U.fmtNum(p.qty) + '</td>' +
+          '<td><button class="btn sm p-px">记录成本</button></td></tr>';
+      }
+      html += '<div class="card"><h2>待采购 PCB / 钢网</h2>' +
+        '<div class="table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th class="num">数量</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
     }
-    html += '<div class="card"><h2>待采购 PCB / 钢网</h2>' +
-      '<div class="table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th class="num">数量</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 
     // —— 已采购 ——
     rows = '';

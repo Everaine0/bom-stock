@@ -179,3 +179,108 @@ def infer_category(name: str, designator: str = "") -> str:
         if c.endswith("H"):
             return "电感"
     return "其他"
+
+
+# ---------------------------------------------------------------- 等价别名生成
+# 与前端 utils.js 的 genAliases 保持一致；仅对电容 / 电阻生成，避免歧义：
+#  电容(基准 pF)：pF/nF/uF 互转 + EIA 三位码；电阻(基准 Ω)：Ω 展开 + k/M 简写 + 低位 4R7，不生成 EIA 码
+def _pnu(s: str):
+    """解析「数值+单位」，返回 (kind, base) 或 None；base 为 电容=pF / 电阻=Ω / 电感=nH。"""
+    t = str(s or "").strip().lower().replace("μ", "u").replace("µ", "u").replace(" ", "")
+    if not t:
+        return None
+
+    def _n(v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    m = re.fullmatch(r"(\d+\.?\d*)(p|n|u|m)f", t)
+    if m:
+        v = _n(m.group(1))
+        if v is not None:
+            return ("cap", v * {"p": 1, "n": 1000, "u": 1000000, "m": 1000000000}[m.group(2)])
+    m = re.fullmatch(r"(\d+\.?\d*)(n|u|m)h", t)
+    if m:
+        v = _n(m.group(1))
+        if v is not None:
+            return ("ind", v * {"n": 1, "u": 1000, "m": 1000000}[m.group(2)])
+    m = re.fullmatch(r"(\d+\.?\d*)(k|meg|m)?(Ω|ω|ohm)?", t)
+    if m:
+        v = _n(m.group(1))
+        if v is not None:
+            pre = m.group(2) or ""
+            base = v * 1000 if pre == "k" else (v * 1000000 if pre in ("m", "meg") else v)
+            return ("res", base)
+    m = re.fullmatch(r"(\d+)r(\d+)", t)
+    if m:
+        return ("res", int(m.group(1)) + int(m.group(2)) / (10 ** len(m.group(2))))
+    return None
+
+
+def _fmt(n) -> str:
+    return ("%.10f" % n).rstrip("0").rstrip(".")
+
+
+def _eia3(base) -> str | None:
+    try:
+        import math as _m
+    except Exception:
+        return None
+    n = round(base)
+    if n <= 0:
+        return None
+    exp = _m.floor(_m.log10(n)) - 1
+    mant = n / (10 ** exp)
+    if mant < 10 or mant >= 100 or exp < 0 or exp > 9:
+        return None
+    mm = round(mant)
+    if abs(mant - mm) > 1e-6:
+        return None
+    return f"{mm}{exp}"
+
+
+def gen_aliases(value: str, category: str) -> list:
+    """按类别生成等价别名（仅电容/电阻；其它类别返回空列表）。"""
+    if category not in ("电容", "电阻"):
+        return []
+    r = _pnu(value)
+    if not r:
+        return []
+    kind, base = r
+    out = []
+
+    def add(x):
+        if x and x not in out:
+            out.append(x)
+
+    if kind == "cap":
+        pf = base
+        add(f"{_fmt(pf)}pf")
+        if pf % 1000 == 0:
+            add(f"{_fmt(pf / 1000)}nf")
+        if pf % 1000000 == 0:
+            add(f"{_fmt(pf / 1000000)}uf")
+        if pf % 1000000000 == 0:
+            add(f"{_fmt(pf / 1000000000)}mf")
+        c3 = _eia3(pf)
+        if c3:
+            add(c3)
+    elif kind == "res":
+        ohm = base
+        add(f"{_fmt(ohm)}Ω")
+        if ohm % 1000 == 0 and ohm % 1000000 != 0:
+            add(f"{_fmt(ohm / 1000)}k")
+            add(f"{_fmt(ohm / 1000)}kΩ")
+        if ohm % 1000000 == 0:
+            add(f"{_fmt(ohm / 1000000)}M")
+            add(f"{_fmt(ohm / 1000000)}MΩ")
+        if 0 < ohm < 10 and (round(ohm * 1000) / 1000) % 1 != 0:
+            s = _fmt(round(ohm * 1000) / 1000)
+            ip = s.find(".")
+            if ip > 0:
+                frac = s[ip + 1:]
+                if len(frac) <= 3:
+                    add(s[:ip] + "R" + frac)
+    return out
